@@ -1,0 +1,13 @@
+[paths]
+default = http://172.18.0.150:1043/gem5
+
+# The following lines were automatically added by gem5/SConstruct
+# to provide the gem5 style-checking hooks
+[extensions]
+style = /home/majiuyue/gem5-latest/util/style.py
+
+[hooks]
+pretxncommit.style = python:style.check_style
+pre-qrefresh.style = python:style.check_style
+# End of SConstruct additions
+
