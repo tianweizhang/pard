@@ -1,0 +1,19 @@
+exporting patch:
+# HG changeset patch
+# User Jiuyue Ma <majiuyue@ncic.ac.cn>
+# Date 1400546087 -28800
+# Node ID 8a2c2d25657d07eb4fc2ef573dfa7fea87c3bca9
+# Parent  3a113e5ef5a086a3a61ffbf298ba515538eeebb1
+dev: add missing tap port to EtherTap
+
+diff -r 3a113e5ef5a0 -r 8a2c2d25657d src/dev/Ethernet.py
+--- a/src/dev/Ethernet.py	Sun May 04 15:55:32 2014 +0800
++++ b/src/dev/Ethernet.py	Tue May 20 08:34:47 2014 +0800
+@@ -59,6 +59,7 @@
+     bufsz = Param.Int(10000, "tap buffer size")
+     dump = Param.EtherDump(NULL, "dump object")
+     port = Param.UInt16(3500, "tap port")
++    tap = MasterPort("EtherTap interface")
+ 
+ class EtherDump(SimObject):
+     type = 'EtherDump'

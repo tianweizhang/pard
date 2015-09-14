@@ -1,0 +1,468 @@
+diff -r 9c55c0214404 src/cpu/base_dyn_inst.hh
+--- a/src/cpu/base_dyn_inst.hh	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/cpu/base_dyn_inst.hh	Thu Feb 27 09:51:59 2014 +0800
+@@ -889,8 +889,14 @@
+         sreqLow = savedSreqLow;
+         sreqHigh = savedSreqHigh;
+     } else {
++        #if THE_ISA == X86_ISA
++        uint64_t qr0 = this->cpu->readMiscRegNoEffect(TheISA::MISCREG_QR0,
++                                                      this->threadNumber);
++        #else
++        uint64_t qr0 = 0;
++        #endif
+         req = new Request(asid, addr, size, flags, masterId(), this->pc.instAddr(),
+-                          thread->contextId(), threadNumber);
++                          thread->contextId(), threadNumber, qr0);
+ 
+         req->taskId(cpu->taskId());
+ 
+@@ -954,8 +960,14 @@
+         sreqLow = savedSreqLow;
+         sreqHigh = savedSreqHigh;
+     } else {
++        #if THE_ISA == X86_ISA
++        uint64_t qr0 = this->cpu->readMiscRegNoEffect(TheISA::MISCREG_QR0,
++                                                      this->threadNumber);
++        #else
++        uint64_t qr0 = 0;
++        #endif
+         req = new Request(asid, addr, size, flags, masterId(), this->pc.instAddr(),
+-                          thread->contextId(), threadNumber);
++                          thread->contextId(), threadNumber, qr0);
+ 
+         req->taskId(cpu->taskId());
+ 
+diff -r 9c55c0214404 src/cpu/o3/fetch_impl.hh
+--- a/src/cpu/o3/fetch_impl.hh	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/cpu/o3/fetch_impl.hh	Thu Feb 27 09:51:59 2014 +0800
+@@ -601,8 +601,12 @@
+     // Build request here.
+     RequestPtr mem_req =
+         new Request(tid, fetchBufferBlockPC, fetchBufferSize,
+-                    Request::INST_FETCH, cpu->instMasterId(), pc,
+-                    cpu->thread[tid]->contextId(), tid);
++        Request::INST_FETCH, cpu->instMasterId(), pc,
++        cpu->thread[tid]->contextId(), tid);
++
++#if THE_ISA == X86_ISA
++    mem_req->setQosTag(cpu->readMiscRegNoEffect(TheISA::MISCREG_QR0, tid));
++#endif
+ 
+     mem_req->taskId(cpu->taskId());
+ 
+diff -r 9c55c0214404 src/cpu/simple/atomic.cc
+--- a/src/cpu/simple/atomic.cc	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/cpu/simple/atomic.cc	Thu Feb 27 09:51:59 2014 +0800
+@@ -314,6 +314,11 @@
+ {
+     // use the CPU's statically allocated read request and packet objects
+     Request *req = &data_read_req;
++    #if THE_ISA == X86_ISA
++    uint64_t qr0 = thread->readMiscRegNoEffect(TheISA::MISCREG_QR0);
++    #else
++    uint64_t qr0 = 0;
++    #endif
+ 
+     if (traceData) {
+         traceData->setAddr(addr);
+@@ -334,6 +339,7 @@
+     req->taskId(taskId());
+     while (1) {
+         req->setVirt(0, addr, size, flags, dataMasterId(), thread->pcState().instAddr());
++        req->setQosTag(qr0);
+ 
+         // translate to physical address
+         Fault fault = thread->dtb->translateAtomic(req, tc, BaseTLB::Read);
+@@ -411,6 +417,11 @@
+ 
+     // use the CPU's statically allocated write request and packet objects
+     Request *req = &data_write_req;
++    #if THE_ISA == X86_ISA
++    uint64_t qr0 = thread->readMiscRegNoEffect(TheISA::MISCREG_QR0);
++    #else
++    uint64_t qr0 = 0;
++    #endif
+ 
+     if (traceData) {
+         traceData->setAddr(addr);
+@@ -431,6 +442,7 @@
+     req->taskId(taskId());
+     while(1) {
+         req->setVirt(0, addr, size, flags, dataMasterId(), thread->pcState().instAddr());
++        req->setQosTag(qr0);
+ 
+         // translate to physical address
+         Fault fault = thread->dtb->translateAtomic(req, tc, BaseTLB::Write);
+@@ -536,6 +548,11 @@
+         if (needToFetch) {
+             ifetch_req.taskId(taskId());
+             setupFetchRequest(&ifetch_req);
++            #if THE_ISA == X86_ISA
++            ifetch_req.setQosTag(thread->readMiscRegNoEffect(TheISA::MISCREG_QR0));
++            #else
++            ifetch_req.setQosTag(0);
++            #endif
+             fault = thread->itb->translateAtomic(&ifetch_req, tc,
+                                                  BaseTLB::Execute);
+         }
+diff -r 9c55c0214404 src/cpu/simple/timing.cc
+--- a/src/cpu/simple/timing.cc	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/cpu/simple/timing.cc	Thu Feb 27 09:51:59 2014 +0800
+@@ -408,13 +408,18 @@
+     const Addr pc = thread->instAddr();
+     unsigned block_size = cacheLineSize();
+     BaseTLB::Mode mode = BaseTLB::Read;
++    #if THE_ISA==X86_ISA
++    uint64_t qr0 = thread->readMiscRegNoEffect(TheISA::MISCREG_QR0);
++    #else
++    uint64_t qr0 = 0;
++    #endif
+ 
+     if (traceData) {
+         traceData->setAddr(addr);
+     }
+ 
+     RequestPtr req  = new Request(asid, addr, size,
+-                                  flags, dataMasterId(), pc, _cpuId, tid);
++                                  flags, dataMasterId(), pc, _cpuId, tid, qr0);
+ 
+     req->taskId(taskId());
+ 
+@@ -477,6 +482,11 @@
+     const Addr pc = thread->instAddr();
+     unsigned block_size = cacheLineSize();
+     BaseTLB::Mode mode = BaseTLB::Write;
++    #if THE_ISA==X86_ISA
++    uint64_t qr0 = thread->readMiscRegNoEffect(TheISA::MISCREG_QR0);
++    #else
++    uint64_t qr0 = 0;
++    #endif
+ 
+     if (data == NULL) {
+         assert(flags & Request::CACHE_BLOCK_ZERO);
+@@ -491,7 +501,7 @@
+     }
+ 
+     RequestPtr req = new Request(asid, addr, size,
+-                                 flags, dataMasterId(), pc, _cpuId, tid);
++                                 flags, dataMasterId(), pc, _cpuId, tid, qr0);
+ 
+     req->taskId(taskId());
+ 
+@@ -575,6 +585,11 @@
+         ifetch_req->taskId(taskId());
+         ifetch_req->setThreadContext(_cpuId, /* thread ID */ 0);
+         setupFetchRequest(ifetch_req);
++        #if THE_ISA==X86_ISA
++        ifetch_req->setQosTag(this->readMiscRegNoEffect(TheISA::MISCREG_QR0));
++        #else
++        ifetch_req->setQosTag(0);
++        #endif
+         DPRINTF(SimpleCPU, "Translating address %#x\n", ifetch_req->getVaddr());
+         thread->itb->translateTiming(ifetch_req, tc, &fetchTranslation,
+                 BaseTLB::Execute);
+diff -r 9c55c0214404 src/mem/cache/blk.hh
+--- a/src/mem/cache/blk.hh	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/mem/cache/blk.hh	Thu Feb 27 09:51:59 2014 +0800
+@@ -121,6 +121,9 @@
+     /** Number of references to this block since it was brought in. */
+     int refCount;
+ 
++    /** majiuyue: holds the qos tag of target process */
++    int qosTag;
++
+     /** holds the source requestor ID for this block. */
+     int srcMasterId;
+ 
+@@ -172,6 +175,7 @@
+         : task_id(ContextSwitchTaskId::Unknown),
+           asid(-1), tag(0), data(0) ,size(0), status(0), whenReady(0),
+           set(-1), isTouched(false), refCount(0),
++          qosTag(-1),
+           srcMasterId(Request::invldMasterId),
+           tickInserted(0)
+     {}
+diff -r 9c55c0214404 src/mem/cache/cache_impl.hh
+--- a/src/mem/cache/cache_impl.hh	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/mem/cache/cache_impl.hh	Thu Feb 27 09:51:59 2014 +0800
+@@ -340,6 +340,7 @@
+         }
+         std::memcpy(blk->data, pkt->getPtr<uint8_t>(), blkSize);
+         blk->status |= BlkDirty;
++        blk->qosTag = pkt->getQosTag();
+         if (pkt->isSupplyExclusive()) {
+             blk->status |= BlkWritable;
+         }
+@@ -1096,6 +1097,7 @@
+     Request *writebackReq =
+         new Request(tags->regenerateBlkAddr(blk->tag, blk->set), blkSize, 0,
+                 Request::wbMasterId);
++    writebackReq->setQosTag(blk->qosTag);
+     if (blk->isSecure())
+         writebackReq->setFlags(Request::SECURE);
+ 
+@@ -1282,6 +1284,7 @@
+     if (is_secure)
+         blk->status |= BlkSecure;
+     blk->status |= BlkValid | BlkReadable;
++    blk->qosTag = pkt->getQosTag();
+ 
+     if (!pkt->sharedAsserted()) {
+         blk->status |= BlkWritable;
+diff -r 9c55c0214404 src/mem/packet.hh
+--- a/src/mem/packet.hh	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/mem/packet.hh	Thu Feb 27 09:51:59 2014 +0800
+@@ -248,6 +248,7 @@
+     /// Are the 'addr' and 'size' fields valid?
+     static const FlagsType VALID_ADDR             = 0x00000100;
+     static const FlagsType VALID_SIZE             = 0x00000200;
++    static const FlagsType VALID_QOSTAG           = 0x00000800;
+     /// Is the data pointer set to a value that shouldn't be freed
+     /// when the packet is destroyed?
+     static const FlagsType STATIC_DATA            = 0x00001000;
+@@ -282,6 +283,9 @@
+     */
+     PacketDataPtr data;
+ 
++    // QoS tag of this packet
++    uint64_t qosTag;
++
+     /// The address of the request.  This address could be virtual or
+     /// physical, depending on the system configuration.
+     Addr addr;
+@@ -552,6 +556,13 @@
+     /// Reset destination field, e.g. to turn a response into a request again.
+     void clearDest() { dest = InvalidPortID; }
+ 
++    uint64_t getQosTag() const { assert(flags.isSet(VALID_QOSTAG)); return qosTag; }
++    void setQosTag(uint64_t tag) {
++        qosTag = tag; flags.set(VALID_QOSTAG);
++        req->setQosTag(tag);
++    }
++    bool hasQosTag() { return flags.isSet(VALID_QOSTAG); }
++
+     Addr getAddr() const { assert(flags.isSet(VALID_ADDR)); return addr; }
+     /**
+      * Update the address of this packet mid-transaction. This is used
+@@ -616,6 +627,10 @@
+             size = req->getSize();
+             flags.set(VALID_SIZE);
+         }
++        if (req->hasQosTag()) {
++            qosTag = req->getQosTag();
++            flags.set(VALID_QOSTAG);
++        }
+     }
+ 
+     /**
+@@ -637,6 +652,10 @@
+         }
+         size = _blkSize;
+         flags.set(VALID_SIZE);
++        if (req->hasQosTag()) {
++            qosTag = req->getQosTag();
++            flags.set(VALID_QOSTAG);
++        }
+     }
+ 
+     /**
+@@ -649,6 +668,7 @@
+     Packet(Packet *pkt, bool clearFlags = false)
+         :  cmd(pkt->cmd), req(pkt->req),
+            data(pkt->flags.isSet(STATIC_DATA) ? pkt->data : NULL),
++           qosTag(pkt->qosTag),
+            addr(pkt->addr), _isSecure(pkt->_isSecure), size(pkt->size),
+            src(pkt->src), dest(pkt->dest),
+            bytesValidStart(pkt->bytesValidStart),
+@@ -662,7 +682,7 @@
+ 
+         flags.set(pkt->flags & (VALID_ADDR|VALID_SIZE));
+         flags.set(pkt->flags & STATIC_DATA);
+-
++        flags.set(pkt->flags & VALID_QOSTAG);
+     }
+ 
+     /**
+diff -r 9c55c0214404 src/mem/protocol/RubySlicc_Exports.sm
+--- a/src/mem/protocol/RubySlicc_Exports.sm	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/mem/protocol/RubySlicc_Exports.sm	Thu Feb 27 09:51:59 2014 +0800
+@@ -32,7 +32,7 @@
+ external_type(bool, primitive="yes", default="false");
+ external_type(std::string, primitive="yes");
+ external_type(uint32_t, primitive="yes");
+-external_type(uint64, primitive="yes");
++external_type(uint64_t, primitive="yes");
+ external_type(PacketPtr, primitive="yes");
+ external_type(Packet, primitive="yes");
+ external_type(Address);
+diff -r 9c55c0214404 src/mem/protocol/RubySlicc_MemControl.sm
+--- a/src/mem/protocol/RubySlicc_MemControl.sm	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/mem/protocol/RubySlicc_MemControl.sm	Thu Feb 27 09:51:59 2014 +0800
+@@ -56,6 +56,7 @@
+   MachineID Sender,             desc="What component sent the data";
+   MachineID OriginalRequestorMachId, desc="What component originally requested";
+   DataBlock DataBlk,            desc="Data to writeback";
++  uint64_t QosTag, default="0xFFFFFFFFFFFFFFFF", desc="QoS Tag of this request";
+   MessageSizeType MessageSize,  desc="size category of the message";
+   // Not all fields used by all protocols:
+   PrefetchBit Prefetch,         desc="Is this a prefetch request";
+diff -r 9c55c0214404 src/mem/protocol/RubySlicc_Types.sm
+--- a/src/mem/protocol/RubySlicc_Types.sm	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/mem/protocol/RubySlicc_Types.sm	Thu Feb 27 09:51:59 2014 +0800
+@@ -116,6 +116,7 @@
+ }
+ 
+ structure(RubyRequest, desc="...", interface="Message", external="yes") {
++  uint64_t QosTag, default="0xAAAAAAAAAAAAAAAA", desc="QoS tag of this request";
+   Address LineAddress,       desc="Line address for this request";
+   Address PhysicalAddress,   desc="Physical address for this request";
+   RubyRequestType Type,      desc="Type of request (LD, ST, etc)";
+diff -r 9c55c0214404 src/mem/request.hh
+--- a/src/mem/request.hh	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/mem/request.hh	Thu Feb 27 09:51:59 2014 +0800
+@@ -108,11 +108,11 @@
+     /** The request is to an uncacheable address. */
+     static const FlagsType UNCACHEABLE                 = 0x00001000;
+     /** This request is to a memory mapped register. */
+-    static const FlagsType MMAPPED_IPR                  = 0x00002000;
++    static const FlagsType MMAPPED_IPR                 = 0x00002000;
+     /** This request is a clear exclusive. */
+     static const FlagsType CLEAR_LL                    = 0x00004000;
+     /** This request is made in privileged mode. */
+-    static const FlagsType PRIVILEGED                   = 0x00008000;
++    static const FlagsType PRIVILEGED                  = 0x00008000;
+ 
+     /** This is a write that is targeted and zeroing an entire cache block.
+      * There is no need for a read/modify/write
+@@ -192,6 +192,9 @@
+     /** Whether or not the sc result is valid. */
+     static const PrivateFlagsType VALID_EXTRA_DATA     = 0x00000080;
+ 
++    /** Whether or not the qosTag result is valid. */
++    static const PrivateFlagsType VALID_QOSTAG         = 0x00000008;
++
+     /** These flags are *not* cleared when a Request object is reused
+        (assigned a new address). */
+     static const PrivateFlagsType STICKY_PRIVATE_FLAGS =
+@@ -250,6 +253,9 @@
+     /** The thread ID (id within this CPU) */
+     int _threadId;
+ 
++    /** QoS tag */
++    uint64_t _qosTag;
++
+     /** program counter of initiating access; for tracing/debugging */
+     Addr _pc;
+ 
+@@ -296,6 +302,15 @@
+         setThreadContext(cid, tid);
+     }
+ 
++    Request(int asid, Addr vaddr, int size, Flags flags, MasterID mid, Addr pc,
++            int cid, ThreadID tid, uint64_t qosTag)
++    {
++        setVirt(asid, vaddr, size, flags, mid, pc);
++        setThreadContext(cid, tid);
++        _qosTag = qosTag;
++        privateFlags.set(VALID_QOSTAG);
++    }
++
+     ~Request() {}
+ 
+     /**
+@@ -325,6 +340,8 @@
+         _flags.set(flags);
+         privateFlags.clear(~STICKY_PRIVATE_FLAGS);
+         privateFlags.set(VALID_PADDR|VALID_SIZE);
++        _qosTag = 0xFFFFFFFFFFFFFFF;
++        privateFlags.set(VALID_QOSTAG);
+         depth = 0;
+         accessDelta = 0;
+         //translateDelta = 0;
+@@ -483,6 +500,7 @@
+     }
+ 
+     /** Accessor function for vaddr.*/
++    bool hasVaddr() { return privateFlags.isSet(VALID_VADDR); }
+     Addr
+     getVaddr()
+     {
+@@ -617,6 +635,26 @@
+     void setAccessLatency() { accessDelta = curTick() - _time - translateDelta; }
+     Tick getAccessLatency() const { return accessDelta; }
+ 
++    /** Accessor function for QoS. */
++    uint64_t
++    getQosTag() const
++    {
++        assert(privateFlags.isSet(VALID_QOSTAG));
++        return _qosTag;
++    }
++
++    bool
++    hasQosTag() const
++    {
++        return privateFlags.isSet(VALID_QOSTAG);
++    }
++
++    void
++    setQosTag(uint64_t qosTag) {
++        _qosTag = qosTag;
++        privateFlags.set(VALID_QOSTAG);
++    }
++
+     /** Accessor functions for flags.  Note that these are for testing
+        only; setting flags should be done via setFlags(). */
+     bool isUncacheable() const { return _flags.isSet(UNCACHEABLE); }
+diff -r 9c55c0214404 src/mem/ruby/slicc_interface/RubyRequest.hh
+--- a/src/mem/ruby/slicc_interface/RubyRequest.hh	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/mem/ruby/slicc_interface/RubyRequest.hh	Thu Feb 27 09:51:59 2014 +0800
+@@ -40,6 +40,7 @@
+ class RubyRequest : public Message
+ {
+   public:
++    uint64_t m_QosTag;
+     Address m_PhysicalAddress;
+     Address m_LineAddress;
+     RubyRequestType m_Type;
+@@ -56,6 +57,7 @@
+         PacketPtr _pkt, PrefetchBit _pb = PrefetchBit_No,
+         unsigned _proc_id = 100)
+         : Message(curTime),
++          m_QosTag(_pkt->getQosTag()&0x0FFFFFFFFFFFFFFF),
+           m_PhysicalAddress(_paddr),
+           m_Type(_type),
+           m_ProgramCounter(_pc),
+@@ -81,6 +83,8 @@
+     const int& getSize() const { return m_Size; }
+     const PrefetchBit& getPrefetch() const { return m_Prefetch; }
+ 
++    const uint64_t getQosTag() const { return m_QosTag; }
++
+     void print(std::ostream& out) const;
+     bool functionalRead(Packet *pkt);
+     bool functionalWrite(Packet *pkt);
+diff -r 9c55c0214404 src/mem/ruby/system/Cache.py
+--- a/src/mem/ruby/system/Cache.py	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/mem/ruby/system/Cache.py	Thu Feb 27 09:51:59 2014 +0800
+@@ -47,3 +47,4 @@
+     dataAccessLatency = Param.Cycles(1, "cycles for a data array access")
+     tagAccessLatency = Param.Cycles(1, "cycles for a tag array access")
+     resourceStalls = Param.Bool(False, "stall if there is a resource failure")
++
+diff -r 9c55c0214404 src/mem/slicc/symbols/StateMachine.py
+--- a/src/mem/slicc/symbols/StateMachine.py	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/mem/slicc/symbols/StateMachine.py	Thu Feb 27 09:51:59 2014 +0800
+@@ -35,9 +35,11 @@
+ python_class_map = {
+                     "int": "Int",
+                     "uint32_t" : "UInt32",
++                    "uint64_t" : "UInt64",
+                     "std::string": "String",
+                     "bool": "Bool",
+                     "CacheMemory": "RubyCache",
++                    "AbstractCacheMemory": "RubyAbstractCache",
+                     "WireBuffer": "RubyWireBuffer",
+                     "Sequencer": "RubySequencer",
+                     "DirectoryMemory": "RubyDirectoryMemory",

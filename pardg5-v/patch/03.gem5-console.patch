@@ -1,0 +1,271 @@
+exporting patch:
+# HG changeset patch
+# User Jiuyue Ma <majiuyue@ncic.ac.cn>
+# Date 1401270511 -28800
+# Node ID 6f1405b82c35bb6cf428ea4dad74dcaf9759f096
+# Parent  8dd700395b45681c37ad5bac0a7b58be1c0743fc
+sim: add gem5 console
+
+diff -r 8dd700395b45 -r 6f1405b82c35 SConstruct
+--- a/SConstruct	Sun Apr 27 15:42:40 2014 +0800
++++ b/SConstruct	Wed May 28 17:48:31 2014 +0800
+@@ -911,6 +911,10 @@
+     print '       Please install zlib and try again.'
+     Exit(1)
+ 
++if not conf.CheckLib('readline'):
++    print 'Error: did not find needed readline library.'
++    Exit(1)
++
+ # If we have the protobuf compiler, also make sure we have the
+ # development libraries. If the check passes, libprotobuf will be
+ # automatically added to the LIBS environment variable. After
+diff -r 8dd700395b45 -r 6f1405b82c35 src/sim/SConscript
+--- a/src/sim/SConscript	Sun Apr 27 15:42:40 2014 +0800
++++ b/src/sim/SConscript	Wed May 28 17:48:31 2014 +0800
+@@ -39,6 +39,7 @@
+ 
+ Source('arguments.cc')
+ Source('async.cc')
++Source('console.cc')
+ Source('core.cc')
+ Source('debug.cc')
+ Source('eventq.cc')
+diff -r 8dd700395b45 -r 6f1405b82c35 src/sim/console.cc
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/src/sim/console.cc	Wed May 28 17:48:31 2014 +0800
+@@ -0,0 +1,140 @@
++#include "sim/async.hh"
++#include "sim/console.hh"
++
++static void gem5_cmd_kill(int argc, const char **argv, void *ctx)
++{
++    async_event = true;
++    async_exit = true;
++}
++
++static void gem5_cmd_clear(int argc, const char **argv, void *ctx)
++{
++    system("clear");
++}
++
++Console * Console::_inst = NULL;
++
++Console::Console()
++    : b_active(false)
++{
++    event = new Event(this, STDIN_FILENO, POLLIN);
++
++    // register builtin command
++    commands["clear"] = new ConsoleCmd("clear", "clear screen",
++                                      gem5_cmd_clear, NULL);
++    commands["kill"]  = new ConsoleCmd("kill", "kill simulation and exit",
++                                      gem5_cmd_kill, NULL);
++    commands["help"]  = new ConsoleCmd("help", "show all available commands",
++                                      Console::show_all_commands, (void *)this);
++}
++
++Console::~Console()
++{
++    if (event)
++        delete event;
++
++    for (std::map<std::string, ConsoleCmd *>::iterator it = commands.begin();
++         it != commands.end(); 
++         it ++)
++    {
++        delete it->second;
++    }
++}
++
++void
++Console::regCmd(const char *name, console_cmd_t cmd, void *ctx,
++                const char  *desc)
++{
++    Console *console = getInstance();
++    if (console->commands.find(name) != console->commands.end())
++        panic("duplicate console command: %s.\n", name);
++    console->commands[name] = new ConsoleCmd(name, desc, cmd, ctx);
++}
++
++void
++Console::active()
++{
++    Console *console = getInstance();
++    if (!console->b_active) {
++        // install the line handler
++        rl_callback_handler_install ("(gem5) ", Console::cb_linehandler);
++        // schedule keyboard event
++        pollQueue.schedule(console->event);
++        console->b_active = true;
++    }
++}
++
++void
++Console::suspend()
++{
++    Console *console = getInstance();
++    if (console->b_active) {
++        // deschedule keyboard event
++        pollQueue.remove(console->event);
++        console->b_active = false;
++        // remove the line handler
++        rl_callback_handler_remove ();
++    }
++}
++
++void Console::cb_linehandler(char *line)
++{
++    if (line == NULL || strcmp (line, "exit") == 0) {
++        if (line == 0)
++            printf ("\n");
++        Console::suspend();
++    }
++    else {
++        if (*line) {
++            add_history (line);
++
++            std::vector<std::string> args;
++            char *saveptr1 = NULL;
++            for (char *p=line; ; p=NULL) {
++                char *token = strtok_r(p, " ", &saveptr1);
++                if (NULL == token)
++                    break;
++                args.push_back(token);
++            }
++            Console::getInstance()->cmdhandler(args);
++        }
++
++        free (line);
++    }
++}
++
++void
++Console::cmdhandler(std::vector<std::string> &args)
++{
++    for (std::map<std::string, ConsoleCmd *>::iterator it = commands.begin();
++         it != commands.end(); 
++         it ++)
++    {
++         if (it->first == args[0]) {
++             int argc = args.size();
++             const char **argv = new const char*[argc];
++             for (int i=0; i<argc; i++)
++                 argv[i] = args[i].c_str();
++             it->second->cmd(argc, argv, it->second->ctx);
++             return;
++         }
++    }
++
++    printf("Unknown command: \"%s\".\n", args[0].c_str());
++}
++
++void
++Console::show_all_commands(int argc, const char **argv, void *ctx)
++{
++    Console *console = static_cast<Console *>(ctx);
++
++    printf("\nAvailable commands:\n\n");
++    for (std::map<std::string, ConsoleCmd *>::iterator it = console->commands.begin();
++         it != console->commands.end(); 
++         it ++)
++    {
++        printf("  %-15s %s\n", it->first.c_str(), it->second->desc.c_str());
++    }
++    printf("\n");
++}
++
+diff -r 8dd700395b45 -r 6f1405b82c35 src/sim/console.hh
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/src/sim/console.hh	Wed May 28 17:48:31 2014 +0800
+@@ -0,0 +1,68 @@
++#ifndef __SIM_CONSOLE_HH__
++#define __SIM_CONSOLE_HH__
++
++#include <unistd.h>
++
++#include <cstdio>
++#include <cstdlib>
++#include <vector>
++
++#include <readline/readline.h>
++#include <readline/history.h>
++
++#include "base/pollevent.hh"
++
++typedef void (*console_cmd_t)(int argc, const char **argv, void *ctx);
++
++struct ConsoleCmd {
++    std::string name;
++    std::string desc;
++    console_cmd_t cmd;
++    void *ctx;
++    ConsoleCmd(std::string _name, std::string _desc, console_cmd_t _cmd, void *_ctx)
++      : name(_name), desc(_desc), cmd(_cmd), ctx(_ctx) {}
++};
++
++class Console
++{
++  private:
++    Console();
++    ~Console();
++
++    static Console *_inst;
++    static Console * getInstance() {
++        if (!_inst) _inst = new Console();
++        return _inst;
++    }
++
++    std::map<std::string, ConsoleCmd *> commands;
++
++    bool b_active;
++
++  public:
++
++    static void regCmd(const char *name, console_cmd_t cmd, void *ctx,
++                       const char *desc);
++    static void active();
++    static void suspend();
++
++  private:
++    class Event : public PollEvent
++    {
++      private:
++        Console *console;
++      public:
++        Event(Console *c, int fd, int e) : PollEvent(fd, e), console(c) {}
++        virtual void process(int revent) { console->process(revent); }
++    };
++    friend class Event;
++    Event *event;
++
++    static void cb_linehandler(char *line);
++    void process(int revent) { rl_callback_read_char(); }
++
++    void cmdhandler(std::vector<std::string> &args);
++    static void show_all_commands(int argc, const char **argv, void *ctx);
++};
++
++#endif    // __SIM_CONSOLE_HH__
+diff -r 8dd700395b45 -r 6f1405b82c35 src/sim/init.cc
+--- a/src/sim/init.cc	Sun Apr 27 15:42:40 2014 +0800
++++ b/src/sim/init.cc	Wed May 28 17:48:31 2014 +0800
+@@ -63,6 +63,8 @@
+ #include <google/protobuf/stubs/common.h>
+ #endif
+ 
++#include "sim/console.hh"
++
+ using namespace std;
+ 
+ /// Stats signal handler.
+@@ -85,8 +87,7 @@
+ void
+ exitNowHandler(int sigtype)
+ {
+-    async_event = true;
+-    async_exit = true;
++    Console::active();
+ }
+ 
+ /// Abort signal handler.

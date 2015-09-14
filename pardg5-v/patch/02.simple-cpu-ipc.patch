@@ -1,0 +1,74 @@
+exporting patches:
+# HG changeset patch
+# User Jiuyue Ma <majiuyue@ncic.ac.cn>
+# Date 1398584560 -28800
+# Node ID d206122c3d8579ce31fee9582d9d18f1aff14d10
+# Parent  88a94c61fed49c34fb914929fdfa292560bbceca
+add ipc metrics to simple cpu; fix carbon bugs when deal with VectorInfo
+
+diff -r 88a94c61fed4 -r d206122c3d85 src/base/stats/carbon.cc
+--- a/src/base/stats/carbon.cc	Fri Apr 25 11:27:20 2014 +0800
++++ b/src/base/stats/carbon.cc	Sun Apr 27 15:42:40 2014 +0800
+@@ -160,12 +160,16 @@
+ bool
+ Carbon::noOutput(const Info &info)
+ {
+-    const char * matchs[2] = {
++    const char * matchs[10] = {
+         "system.mem_ctrls.addr_mapper.bw_total",
+-        "system.l2.tags.guestCapacity"
++        "system.l2.tags.guestCapacity",
++        "system.cpu0.ipc", "system.switch_cpus0.ipc",
++        "system.cpu1.ipc", "system.switch_cpus1.ipc",
++        "system.cpu2.ipc", "system.switch_cpus2.ipc",
++        "system.cpu3.ipc", "system.switch_cpus3.ipc"
+     };
+ 
+-    for (int i=0; i<2; i++) {
++    for (int i=0; i<10; i++) {
+         if (strncmp(info.name.c_str(), matchs[i], strlen(matchs[i])) == 0)
+             return false;
+     }
+@@ -201,9 +205,10 @@
+         return;
+ 
+     for (off_type i = 0; i < info.size(); ++i) {
+-        if (info.subnames[i].empty())
+-            continue;
+-        generate(info.name + "." + info.subnames[i], info.result()[i]);
++        if (!info.subnames[i].empty())
++            generate(info.name + "." + info.subnames[i], info.result()[i]);
++        else
++            generate(info.name, info.result()[i]);
+     }
+ }
+ 
+diff -r 88a94c61fed4 -r d206122c3d85 src/cpu/simple/base.cc
+--- a/src/cpu/simple/base.cc	Fri Apr 25 11:27:20 2014 +0800
++++ b/src/cpu/simple/base.cc	Sun Apr 27 15:42:40 2014 +0800
+@@ -160,6 +160,13 @@
+         .desc("Number of instructions committed")
+         ;
+ 
++    ipc 
++        .name(name()+".ipc")
++        .desc("Instructions per cycle")
++        ;
++
++    ipc = numInsts / numCycles;
++
+     numOps
+         .name(name() + ".committedOps")
+         .desc("Number of ops (including micro ops) committed")
+diff -r 88a94c61fed4 -r d206122c3d85 src/cpu/simple/base.hh
+--- a/src/cpu/simple/base.hh	Fri Apr 25 11:27:20 2014 +0800
++++ b/src/cpu/simple/base.hh	Sun Apr 27 15:42:40 2014 +0800
+@@ -209,6 +209,9 @@
+         return numOp - startNumOp;
+     } 
+
++    // number of idle cycles
++    Stats::Formula ipc;
++
+     //number of integer alu accesses
+     Stats::Scalar numIntAluAccesses;

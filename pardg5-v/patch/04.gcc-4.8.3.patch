@@ -1,0 +1,33 @@
+exporting patch:
+# HG changeset patch
+# User Jiuyue Ma <majiuyue@ncic.ac.cn>
+# Date 1402275834 -28800
+# Node ID 93ad44d38d79c825404e9e72ef08f6e9d18d78d5
+# Parent  04eeaf413a83a2e02df0906d90d63ec80c98d7a9
+env: modify for gcc-4.8.3
+
+diff -r 04eeaf413a83 -r 93ad44d38d79 src/arch/x86/isa/microops/regop.isa
+--- a/src/arch/x86/isa/microops/regop.isa	Fri Jun 06 08:36:53 2014 +0800
++++ b/src/arch/x86/isa/microops/regop.isa	Mon Jun 09 09:03:54 2014 +0800
+@@ -1718,8 +1718,8 @@
+             } else {
+                 HandyM5Reg m5reg = M5Reg;
+                 // QoS only worked in protected-mode with CPL==0
+-                //if (!m5reg.prot || m5reg.cpl>0)
+-                //    fault = new GeneralProtection(0);
++                if (!m5reg.prot || m5reg.cpl>0)
++                    fault = new GeneralProtection(0);
+                 QoSDest = psrc1;
+             }
+         '''
+diff -r 04eeaf413a83 -r 93ad44d38d79 src/base/stats/carbon.cc
+--- a/src/base/stats/carbon.cc	Fri Jun 06 08:36:53 2014 +0800
++++ b/src/base/stats/carbon.cc	Mon Jun 09 09:03:54 2014 +0800
+@@ -50,6 +50,7 @@
+ #include <netinet/in.h>
+ #include <sys/socket.h>
+ #include <sys/types.h>
++#include <unistd.h>
+ 
+ #include "base/stats/carbon.hh"
+ #include "base/stats/info.hh"

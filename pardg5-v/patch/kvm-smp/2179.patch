@@ -1,0 +1,117 @@
+diff -r 24cfe67c0749 -r 297de8f21b5a src/arch/x86/interrupts.hh
+--- a/src/arch/x86/interrupts.hh	Mon Mar 03 14:44:57 2014 +0100
++++ b/src/arch/x86/interrupts.hh	Mon Mar 03 16:51:13 2014 +0100
+@@ -281,6 +281,12 @@
+      * @return true if there are interrupts pending.
+      */
+     bool checkInterruptsRaw() const;
++    /**
++     * Check if there are pending unmaskable interrupts.
++     *
++     * @return true there are unmaskable interrupts pending.
++     */
++    bool hasPendingUnmaskable() const { return pendingUnmaskableInt; }
+     Fault getInterrupt(ThreadContext *tc);
+     void updateIntrInfo(ThreadContext *tc);
+ 
+diff -r 24cfe67c0749 -r 297de8f21b5a src/cpu/kvm/base.hh
+--- a/src/cpu/kvm/base.hh	Mon Mar 03 14:44:57 2014 +0100
++++ b/src/cpu/kvm/base.hh	Mon Mar 03 16:51:13 2014 +0100
+@@ -241,6 +241,11 @@
+      * make sure that the KVM state is synchronized and that the TC is
+      * invalidated after entering KVM.
+      *
++     * @note This method does not normally cause any state
++     * transitions. However, if it may suspend the CPU by suspending
++     * the thread, which leads to a transition to the Idle state. In
++     * such a case, kvm <i>must not</i> be entered.
++     *
+      * @param ticks Number of ticks to execute, set to 0 to exit
+      * immediately after finishing pending operations.
+      * @return Number of ticks executed (see note)
+diff -r 24cfe67c0749 -r 297de8f21b5a src/cpu/kvm/base.cc
+--- a/src/cpu/kvm/base.cc	Mon Mar 03 14:44:57 2014 +0100
++++ b/src/cpu/kvm/base.cc	Mon Mar 03 16:51:13 2014 +0100
+@@ -543,6 +543,12 @@
+               delay = kvmRun(ticksToExecute);
+           }
+ 
++          // The CPU might have been suspended before entering into
++          // KVM. Assume that the CPU was suspended /before/ entering
++          // into KVM and skip the exit handling.
++          if (_status == Idle)
++              break;
++
+           // Entering into KVM implies that we'll have to reload the thread
+           // context from KVM if we want to access it. Flag the KVM state as
+           // dirty with respect to the cached thread context.
+diff -r 24cfe67c0749 -r 297de8f21b5a src/cpu/kvm/x86_cpu.cc
+--- a/src/cpu/kvm/x86_cpu.cc	Mon Mar 03 14:44:57 2014 +0100
++++ b/src/cpu/kvm/x86_cpu.cc	Mon Mar 03 16:51:13 2014 +0100
+@@ -1137,7 +1137,27 @@
+     interrupts->updateIntrInfo(tc);
+ 
+     X86Interrupt *x86int(dynamic_cast<X86Interrupt *>(fault.get()));
+-    if (x86int) {
++    if (dynamic_cast<NonMaskableInterrupt *>(fault.get())) {
++        DPRINTF(KvmInt, "Delivering NMI\n");
++        kvmNonMaskableInterrupt();
++    } else if (dynamic_cast<InitInterrupt *>(fault.get())) {
++        DPRINTF(KvmInt, "INIT interrupt\n");
++        fault.get()->invoke(tc);
++        // Delay the kvm state update since we won't enter KVM on this
++        // tick.
++        threadContextDirty = true;
++        // HACK: gem5 doesn't actually have any BIOS code, which means
++        // that we need to halt the thread and wait for a startup
++        // interrupt before restarting the thread. The simulated CPUs
++        // use the same kind of hack using a microcode routine.
++        thread->suspend();
++    } else if (dynamic_cast<StartupInterrupt *>(fault.get())) {
++        DPRINTF(KvmInt, "STARTUP interrupt\n");
++        fault.get()->invoke(tc);
++        // The kvm state is assumed to have been updated when entering
++        // kvmRun(), so we need to update manually it here.
++        updateKvmState();
++    } else if (x86int) {
+         struct kvm_interrupt kvm_int;
+         kvm_int.irq = x86int->getVector();
+ 
+@@ -1145,9 +1165,6 @@
+                 fault->name(), kvm_int.irq);
+ 
+         kvmInterrupt(kvm_int);
+-    } else if (dynamic_cast<NonMaskableInterrupt *>(fault.get())) {
+-        DPRINTF(KvmInt, "Delivering NMI\n");
+-        kvmNonMaskableInterrupt();
+     } else {
+         panic("KVM: Unknown interrupt type\n");
+     }
+@@ -1160,7 +1177,12 @@
+     struct kvm_run &kvm_run(*getKvmRunState());
+ 
+     if (interrupts->checkInterruptsRaw()) {
+-        if (kvm_run.ready_for_interrupt_injection) {
++        if (interrupts->hasPendingUnmaskable()) {
++            DPRINTF(KvmInt,
++                    "Delivering unmaskable interrupt.\n");
++            syncThreadContext();
++            deliverInterrupts();
++        } else if (kvm_run.ready_for_interrupt_injection) {
+             // KVM claims that it is ready for an interrupt. It might
+             // be lying if we just updated rflags and disabled
+             // interrupts (e.g., by doing a CPU handover). Let's sync
+@@ -1187,7 +1209,12 @@
+         kvm_run.request_interrupt_window = 0;
+     }
+ 
+-    return kvmRunWrapper(ticks);
++    // The CPU might have been suspended as a result of the INIT
++    // interrupt delivery hack. In that case, don't enter into KVM.
++    if (_status == Idle)
++        return 0;
++    else
++        return kvmRunWrapper(ticks);
+ }
+ 
+ Tick

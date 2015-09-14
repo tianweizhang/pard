@@ -1,0 +1,10 @@
+diff -r 9c55c0214404 build_opts/PARDX86
+new file mode 100644
+--- /dev/null			Mon Feb 24 20:50:06 2014 -0600
++++ b/build_opts/PARDX86	Mon Feb 24 20:50:06 2014 -0600
+@@ -0,0 +1,5 @@
++TARGET_ISA = 'x86'
++CPU_MODELS = 'AtomicSimpleCPU,O3CPU,TimingSimpleCPU'
++PROTOCOL = 'PARD_MESI_CMP_directory'
++PARD_ENABLED = True
++PARD_CPU_MODELS = 'TimingPardPU'

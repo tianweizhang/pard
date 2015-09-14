@@ -1,0 +1,61 @@
+diff -r 9c55c0214404 SConstruct
+--- a/SConstruct	Mon Feb 24 20:50:06 2014 -0600
++++ b/SConstruct	Thu Feb 27 12:41:03 2014 +0800
+@@ -1037,6 +1037,36 @@
+ 
+ Export('CpuModel')
+ 
++# majiuyue: Let's make a PardCpuModel for our Pard-C CPU
++class PardCpuModel(object):
++    '''The PardCpuModel class encapsulates everything the ISA parser needs to
++    know about a particular CPU model.'''
++
++    # Dict of available CPU model objects.  Accessible as PardCpuModel.dict.
++    dict = {}
++    list = []
++    defaults = []
++
++    # Constructor.  Automatically adds models to PardCpuModel.dict.
++    def __init__(self, name, filename, includes, strings, default=False):
++        self.name = name           # name of model
++        self.filename = filename   # filename for output exec code
++        self.includes = includes   # include files needed in exec file
++        # The 'strings' dict holds all the per-CPU symbols we can
++        # substitute into templates etc.
++        self.strings = strings
++
++        # This cpu is enabled by default
++        self.default = default
++
++        # Add self to dict
++        if name in PardCpuModel.dict:
++            raise AttributeError, "PardCpuModel '%s' already registered" % name
++        PardCpuModel.dict[name] = self
++        PardCpuModel.list.append(name)
++
++Export('PardCpuModel')
++
+ # Sticky variables get saved in the variables file so they persist from
+ # one invocation to the next (unless overridden, in which case the new
+ # value becomes sticky).
+@@ -1076,6 +1106,11 @@
+     ListVariable('CPU_MODELS', 'CPU models',
+                  sorted(n for n,m in CpuModel.dict.iteritems() if m.default),
+                  sorted(CpuModel.list)),
++    ListVariable('PARD_CPU_MODELS', 'PARD-C CPU models',
++                 sorted(n for n,m in PardCpuModel.dict.iteritems() if m.default),
++                 sorted(PardCpuModel.list)),
++    BoolVariable('PARD_ENABLED', 'Compile with PARD feature enabled',
++                 False),
+     BoolVariable('EFENCE', 'Link with Electric Fence malloc debugger',
+                  False),
+     BoolVariable('SS_COMPATIBLE_FP',
+@@ -1095,7 +1130,7 @@
+ # These variables get exported to #defines in config/*.hh (see src/SConscript).
+ export_vars += ['USE_FENV', 'SS_COMPATIBLE_FP', 'TARGET_ISA', 'CP_ANNOTATE',
+                 'USE_POSIX_CLOCK', 'PROTOCOL', 'HAVE_PROTOBUF',
+-                'HAVE_PERF_ATTR_EXCLUDE_HOST']
++                'HAVE_PERF_ATTR_EXCLUDE_HOST', 'PARD_ENABLED']
+ 
+ ###################################################
+ #

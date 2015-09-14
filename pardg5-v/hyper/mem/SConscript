@@ -1,0 +1,14 @@
+# -*- mode:python -*-
+
+Import('*')
+
+SimObject('PARDg5VAddrMapper.py')
+SimObject('PARDg5VBridge.py')
+SimObject('PARDg5VDRAMCtrl.py')
+
+Source('addr_mapper.cc')
+Source('bridge.cc')
+Source('dram_ctrl.cc')
+Source('port_proxy.cc')
+
+DebugFlag('AddrMapper')

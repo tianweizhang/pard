@@ -1,0 +1,208 @@
+exporting patches:
+# HG changeset patch
+# User Jiuyue Ma <majiuyue@ncic.ac.cn>
+# Date 1402014908 -28800
+# Node ID 6f3e0a3df1901ae3533ce5475b12a1f7cb500baa
+# Parent  5543613ae08b87ef456141a7b2071f4bb37ac25b
+stats: use regex for carbon statistics filter
+
+diff -r 5543613ae08b -r 6f3e0a3df190 src/base/stats/carbon.cc
+--- a/src/base/stats/carbon.cc	Wed May 28 18:21:08 2014 +0800
++++ b/src/base/stats/carbon.cc	Fri Jun 06 08:35:08 2014 +0800
+@@ -113,7 +113,8 @@
+ std::list<Info *> &statsList();
+ 
+ Carbon::Carbon()
+-    : sockfd(-1), descriptions(false)
++    : sockfd(-1), host("127.0.0.1"), port("2003"),
++      catalog("gem5test"), descriptions(false)
+ {
+     ts = time(NULL);
+ }
+@@ -159,6 +160,9 @@
+ bool
+ Carbon::noOutput(const Info &info)
+ {
++    if (0 == regexec(&filter, info.name.c_str(), 0, NULL, 0))
++        return false;
++
+     const char * matchs[10] = {
+         "system.mem_ctrls.addr_mapper.bw_total",
+         "system.l2.tags.guestCapacity",
+@@ -179,14 +183,11 @@
+ void
+ Carbon::generate(const std::string &key, Result value)
+ {
+-    char buf[4096];
+     if (sockfd == -1)
+         return;
+-    snprintf(buf, 4096, "gem5test.%s %s %ld\n",
+-             key.c_str(),
+-             ValueToString(value, 2).c_str(),
+-             ts);
+-    write(sockfd, buf, strlen(buf));
++    std::stringstream result;
++    result<<catalog<<"."<<key<<" "<<ValueToString(value, 2)<<" "<<ts<<endl;
++    write(sockfd, result.str().c_str(), result.str().size());
+ }
+ 
+ void
+@@ -228,13 +229,16 @@
+ void Carbon::visit(const SparseHistInfo &info) { CARBON_UNIMPL(SparseHist); }
+ 
+ Output *
+-initCarbon(const string &host, bool desc)
++initCarbon(const std::string &host, const std::string &catalog,
++           const std::string &regex, bool desc)
+ {
+     static Carbon carbon;
+     static bool connected = false;
+ 
+     if (!connected) {
+         carbon.setCarbonHost(host, "2003");
++        carbon.setCatalog(catalog);
++        carbon.setFilter(regex);
+         carbon.descriptions = desc;
+         connected = true;
+     }
+diff -r 5543613ae08b -r 6f3e0a3df190 src/base/stats/carbon.hh
+--- a/src/base/stats/carbon.hh	Wed May 28 18:21:08 2014 +0800
++++ b/src/base/stats/carbon.hh	Fri Jun 06 08:35:08 2014 +0800
+@@ -34,9 +34,13 @@
+ #include <iosfwd>
+ #include <string>
+ 
++#include <sys/types.h>
++#include <regex.h>
++
++#include "base/misc.hh"
++#include "base/output.hh"
+ #include "base/stats/output.hh"
+ #include "base/stats/types.hh"
+-#include "base/output.hh"
+ 
+ namespace Stats {
+ 
+@@ -46,6 +50,8 @@
+     int sockfd;
+     std::string host;
+     std::string port;
++    std::string catalog;
++    regex_t filter;
+     time_t ts;
+ 
+   protected:
+@@ -65,6 +71,13 @@
+         port = _port;
+     }
+ 
++    void setCatalog(const std::string &_catalog) { catalog = _catalog; }
++    void setFilter(const std::string &_regex) {
++        int ret = regcomp(&filter, _regex.c_str(), REG_ICASE);
++        panic_if(ret!=0, "carbon: bad filter regex [%s]\n", _regex.c_str());
++    }
++    
++
+     // Implement Visit
+     virtual void visit(const ScalarInfo &info);
+     virtual void visit(const VectorInfo &info);
+@@ -85,7 +98,8 @@
+ 
+ std::string ValueToString(Result value, int precision);
+ 
+-Output *initCarbon(const std::string &carbon_host, bool desc);
++Output *initCarbon(const std::string &host, const std::string &catalog,
++                   const std::string &regex, bool desc);
+ 
+ } // namespace Stats
+ 
+diff -r 5543613ae08b -r 6f3e0a3df190 src/python/m5/main.py
+--- a/src/python/m5/main.py	Wed May 28 18:21:08 2014 +0800
++++ b/src/python/m5/main.py	Fri Jun 06 08:35:08 2014 +0800
+@@ -82,6 +82,13 @@
+     group("Statistics Options")
+     option("--stats-file", metavar="FILE", default="stats.txt",
+         help="Sets the output file for statistics [Default: %default]")
++    option("--carbon-server", action="store", default="127.0.0.1",
++        help="Set the carbon server ip for carbon statistics [Default: %default]") 
++    option("--carbon-catalog", action="store", default="gem5test",
++        help="Set the catalog for carbon statistics [Default: %default]")
++    option("--carbon-regex", action="store", default="^[A-Za-z_]*\.\(\(switch_\)*cpu[s]*[0-9]*\.ipc\)*\(l2\.\([A-Za-z_]*\.\)*guestCapacity\)*\(mem_ctrls[0-9]*\.\([A-Za-z_]*\.\)*bw_total\)*$",
++        help="Set the filter regex for carbon statistics [Default: %default]") 
++    #"(\w+\.)((\w*cpu\d*\.ipc)|(l2\.(\w+\.)*guestCapacity)|(mem_ctrls\d*\.(\w+\.)*bw_total))"
+ 
+     # Configuration Options
+     group("Configuration Options")
+@@ -313,7 +320,8 @@
+ 
+     # set stats options
+     stats.initText(options.stats_file)
+-    stats.initCarbon("127.0.0.1")
++    stats.initCarbon(options.carbon_server, options.carbon_catalog,
++                     options.carbon_regex)
+ 
+     # set debugging options
+     debug.setRemoteGDBPort(options.remote_gdb_port)
+diff -r 5543613ae08b -r 6f3e0a3df190 src/python/m5/stats/__init__.py
+--- a/src/python/m5/stats/__init__.py	Wed May 28 18:21:08 2014 +0800
++++ b/src/python/m5/stats/__init__.py	Fri Jun 06 08:35:08 2014 +0800
+@@ -39,8 +39,8 @@
+     output = internal.stats.initText(filename, desc)
+     outputList.append(output)
+ 
+-def initCarbon(host, desc=True):
+-    output = internal.stats.initCarbon(host, desc)
++def initCarbon(host, catalog, regex, desc=True):
++    output = internal.stats.initCarbon(host, catalog, regex, desc)
+     outputList.append(output)
+ 
+ def initSimStats():
+diff -r 5543613ae08b -r 6f3e0a3df190 src/python/swig/stats.i
+--- a/src/python/swig/stats.i	Wed May 28 18:21:08 2014 +0800
++++ b/src/python/swig/stats.i	Fri Jun 06 08:35:08 2014 +0800
+@@ -150,7 +150,8 @@
+ 
+ void initSimStats();
+ Output *initText(const std::string &filename, bool desc);
+-Output *initCarbon(const std::string &carbon_host, bool desc);
++Output *initCarbon(const std::string &host, const std::string &catalog,
++                   const std::string &regex, bool desc);
+ 
+ void schedStatEvent(bool dump, bool reset,
+                     Tick when = curTick(), Tick repeat = 0);
+# HG changeset patch
+# User Jiuyue Ma <majiuyue@ncic.ac.cn>
+# Date 1402015013 -28800
+# Node ID 04eeaf413a83a2e02df0906d90d63ec80c98d7a9
+# Parent  6f3e0a3df1901ae3533ce5475b12a1f7cb500baa
+stats: fix style warning in carbon
+
+diff -r 6f3e0a3df190 -r 04eeaf413a83 src/base/stats/carbon.hh
+--- a/src/base/stats/carbon.hh	Fri Jun 06 08:35:08 2014 +0800
++++ b/src/base/stats/carbon.hh	Fri Jun 06 08:36:53 2014 +0800
+@@ -76,7 +76,7 @@
+         int ret = regcomp(&filter, _regex.c_str(), REG_ICASE);
+         panic_if(ret!=0, "carbon: bad filter regex [%s]\n", _regex.c_str());
+     }
+-    
++
+ 
+     // Implement Visit
+     virtual void visit(const ScalarInfo &info);
+diff -r 6f3e0a3df190 -r 04eeaf413a83 src/python/m5/main.py
+--- a/src/python/m5/main.py	Fri Jun 06 08:35:08 2014 +0800
++++ b/src/python/m5/main.py	Fri Jun 06 08:36:53 2014 +0800
+@@ -83,11 +83,11 @@
+     option("--stats-file", metavar="FILE", default="stats.txt",
+         help="Sets the output file for statistics [Default: %default]")
+     option("--carbon-server", action="store", default="127.0.0.1",
+-        help="Set the carbon server ip for carbon statistics [Default: %default]") 
++        help="Set the carbon server ip for carbon statistics [Default: %default]")
+     option("--carbon-catalog", action="store", default="gem5test",
+         help="Set the catalog for carbon statistics [Default: %default]")
+     option("--carbon-regex", action="store", default="^[A-Za-z_]*\.\(\(switch_\)*cpu[s]*[0-9]*\.ipc\)*\(l2\.\([A-Za-z_]*\.\)*guestCapacity\)*\(mem_ctrls[0-9]*\.\([A-Za-z_]*\.\)*bw_total\)*$",
+-        help="Set the filter regex for carbon statistics [Default: %default]") 
++        help="Set the filter regex for carbon statistics [Default: %default]")
+     #"(\w+\.)((\w*cpu\d*\.ipc)|(l2\.(\w+\.)*guestCapacity)|(mem_ctrls\d*\.(\w+\.)*bw_total))"
+ 
+     # Configuration Options

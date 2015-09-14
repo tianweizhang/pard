@@ -1,0 +1,208 @@
+exporting patch:
+# HG changeset patch
+# User Jiuyue Ma <majiuyue@ncic.ac.cn>
+# Date 1404804574 -28800
+# Node ID 314b2035d065b336eea76abe6871121eae53fb32
+# Parent  8f32fcbc2ea756fc2e40740b46c4c526202621f6
+mem: add PARD support code for DRAMCtrl
+
+diff -r 8f32fcbc2ea7 -r 314b2035d065 SConstruct
+--- a/SConstruct	Wed Jun 18 16:47:29 2014 +0800
++++ b/SConstruct	Tue Jul 08 15:29:34 2014 +0800
+@@ -1082,13 +1082,14 @@
+     BoolVariable('USE_FENV', 'Use <fenv.h> IEEE mode control', have_fenv),
+     BoolVariable('CP_ANNOTATE', 'Enable critical path annotation capability', False),
+     BoolVariable('USE_KVM', 'Enable hardware virtualized (KVM) CPU models', have_kvm),
++    BoolVariable('ENABLE_PARD', 'Enable PARD support code', False),
+     EnumVariable('PROTOCOL', 'Coherence protocol for Ruby', 'None',
+                   all_protocols),
+     )
+ 
+ # These variables get exported to #defines in config/*.hh (see src/SConscript).
+ export_vars += ['USE_FENV', 'SS_COMPATIBLE_FP', 'TARGET_ISA', 'CP_ANNOTATE',
+-                'USE_POSIX_CLOCK', 'PROTOCOL', 'HAVE_PROTOBUF',
++                'USE_POSIX_CLOCK', 'PROTOCOL', 'HAVE_PROTOBUF', 'ENABLE_PARD',
+                 'HAVE_PERF_ATTR_EXCLUDE_HOST']
+ 
+ ###################################################
+diff -r 8f32fcbc2ea7 -r 314b2035d065 src/mem/dram_ctrl.cc
+--- a/src/mem/dram_ctrl.cc	Wed Jun 18 16:47:29 2014 +0800
++++ b/src/mem/dram_ctrl.cc	Tue Jul 08 15:29:34 2014 +0800
+@@ -44,6 +44,7 @@
+ 
+ #include "base/bitfield.hh"
+ #include "base/trace.hh"
++#include "config/enable_pard.hh"
+ #include "debug/DRAM.hh"
+ #include "debug/DRAMState.hh"
+ #include "debug/Drain.hh"
+@@ -1761,6 +1762,26 @@
+       memory(_memory)
+ { }
+ 
++#ifdef ENABLE_PARD
++void
++DRAMCtrl::MemoryPort::schedTimingResp(PacketPtr pkt, Tick when)
++{
++    DRAMCtrlSenderState *receivedState =
++        dynamic_cast<DRAMCtrlSenderState *>(pkt->senderState);
++
++    // Restore initial sender state
++    panic_if(receivedState == NULL, 
++             "DRAMCtrl %s got a response without send state\n",
++             name());
++
++    pkt->senderState = receivedState->predecessor;
++    pkt->setAddr(receivedState->origAddr);
++    delete receivedState;
++ 
++    queue.schedSendTiming(pkt, when);
++}
++#endif
++
+ AddrRangeList
+ DRAMCtrl::MemoryPort::getAddrRanges() const
+ {
+@@ -1774,12 +1795,22 @@
+ {
+     pkt->pushLabel(memory.name());
+ 
++#ifndef ENABLE_PARD
+     if (!queue.checkFunctional(pkt)) {
+         // Default implementation of SimpleTimingPort::recvFunctional()
+         // calls recvAtomic() and throws away the latency; we can save a
+         // little here by just not calculating the latency.
+         memory.recvFunctional(pkt);
+     }
++#else
++    LDomID ldomID = QOSTAG_TO_LDOMID(pkt->getQosTag());
++    Addr orig_addr = pkt->getAddr();
++    pkt->setAddr(memory.tlb.remapAddr(ldomID, orig_addr));
++    if (!queue.checkFunctional(pkt)) {
++        memory.recvFunctional(pkt);
++    }
++    pkt->setAddr(orig_addr);
++#endif
+ 
+     pkt->popLabel();
+ }
+@@ -1787,14 +1818,47 @@
+ Tick
+ DRAMCtrl::MemoryPort::recvAtomic(PacketPtr pkt)
+ {
++#ifndef ENABLE_PARD
+     return memory.recvAtomic(pkt);
++#else
++    LDomID ldomID = QOSTAG_TO_LDOMID(pkt->getQosTag());
++    Addr orig_addr = pkt->getAddr();
++    pkt->setAddr(memory.tlb.remapAddr(ldomID, orig_addr));
++    Tick ret_tick = memory.recvAtomic(pkt);
++    pkt->setAddr(orig_addr);
++    return ret_tick;
++#endif
+ }
+ 
+ bool
+ DRAMCtrl::MemoryPort::recvTimingReq(PacketPtr pkt)
+ {
++#ifndef ENABLE_PARD
+     // pass it to the memory controller
+     return memory.recvTimingReq(pkt);
++#else
++    LDomID ldomID = QOSTAG_TO_LDOMID(pkt->getQosTag());
++    Addr orig_addr = pkt->getAddr();
++    bool needsResponse = pkt->needsResponse();
++    bool memInhibitAsserted = pkt->memInhibitAsserted();
++
++    if (needsResponse && !memInhibitAsserted) {
++        pkt->pushSenderState(new DRAMCtrlSenderState(orig_addr));
++    }
++
++    pkt->setAddr(memory.tlb.remapAddr(ldomID, orig_addr));
++
++    // Attempt to send the packet (always succeeds for inhibited
++    // packets)
++    bool successful = memory.recvTimingReq(pkt);
++
++    // If not successful, restore the sender state
++    if (!successful && needsResponse) {
++        delete pkt->popSenderState();
++    }
++
++    return successful;
++#endif
+ }
+ 
+ DRAMCtrl*
+diff -r 8f32fcbc2ea7 -r 314b2035d065 src/mem/dram_ctrl.hh
+--- a/src/mem/dram_ctrl.hh	Wed Jun 18 16:47:29 2014 +0800
++++ b/src/mem/dram_ctrl.hh	Tue Jul 08 15:29:34 2014 +0800
+@@ -53,6 +53,7 @@
+ #include <deque>
+ 
+ #include "base/statistics.hh"
++#include "config/enable_pard.hh"
+ #include "enums/AddrMap.hh"
+ #include "enums/MemSched.hh"
+ #include "enums/PageManage.hh"
+@@ -61,6 +62,10 @@
+ #include "params/DRAMCtrl.hh"
+ #include "sim/eventq.hh"
+ 
++#ifdef ENABLE_PARD
++#include "hyper/base/ldom_addr.hh"
++#endif
++
+ /**
+  * The DRAM controller is a basic single-channel memory controller
+  * aiming to mimic a high-level DRAM controller and the most important
+@@ -85,6 +90,18 @@
+ 
+   private:
+ 
++#ifdef ENABLE_PARD
++    class DRAMCtrlSenderState : public Packet::SenderState
++    {
++      public:
++        DRAMCtrlSenderState(Addr _origAddr) : origAddr(_origAddr)
++        { }
++        ~DRAMCtrlSenderState() { }
++        /** The original address the packet was destined for */
++        Addr origAddr;
++    };
++#endif
++
+     // For now, make use of a queued slave port to avoid dealing with
+     // flow control for the responses being sent back
+     class MemoryPort : public QueuedSlavePort
+@@ -97,6 +114,10 @@
+ 
+         MemoryPort(const std::string& name, DRAMCtrl& _memory);
+ 
++#ifdef ENABLE_PARD
++        void schedTimingResp(PacketPtr pkt, Tick when);
++#endif
++
+       protected:
+ 
+         Tick recvAtomic(PacketPtr pkt);
+@@ -411,6 +432,19 @@
+      */
+     void printQs() const;
+ 
++#ifdef ENABLE_PARD
++  protected:
++    /**
++     * PARD Configuration Table
++     * 1. Logical domain address translator
++     * 2. Bandwidth restriction
++     * 3. Bandwidth usage
++     */
++    LDomAddrTLB tlb;
++
++  private:
++#endif
++
+     /**
+      * The controller's main read and write queues
+      */

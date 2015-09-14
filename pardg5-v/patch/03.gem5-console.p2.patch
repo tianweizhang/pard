@@ -1,0 +1,72 @@
+exporting patch:
+# HG changeset patch
+# User Jiuyue Ma <majiuyue@ncic.ac.cn>
+# Date 1401272468 -28800
+# Node ID 5543613ae08b87ef456141a7b2071f4bb37ac25b
+# Parent  6f1405b82c35bb6cf428ea4dad74dcaf9759f096
+sim: better interactive console UI
+
+diff -r 6f1405b82c35 -r 5543613ae08b src/sim/console.cc
+--- a/src/sim/console.cc	Wed May 28 17:48:31 2014 +0800
++++ b/src/sim/console.cc	Wed May 28 18:21:08 2014 +0800
+@@ -34,7 +34,7 @@
+         delete event;
+ 
+     for (std::map<std::string, ConsoleCmd *>::iterator it = commands.begin();
+-         it != commands.end(); 
++         it != commands.end();
+          it ++)
+     {
+         delete it->second;
+@@ -56,6 +56,7 @@
+ {
+     Console *console = getInstance();
+     if (!console->b_active) {
++        printf("Enter interactive console mode.\n");
+         // install the line handler
+         rl_callback_handler_install ("(gem5) ", Console::cb_linehandler);
+         // schedule keyboard event
+@@ -74,6 +75,7 @@
+         console->b_active = false;
+         // remove the line handler
+         rl_callback_handler_remove ();
++        printf("Exit interactive console mode.\n");
+     }
+ }
+ 
+@@ -107,7 +109,7 @@
+ Console::cmdhandler(std::vector<std::string> &args)
+ {
+     for (std::map<std::string, ConsoleCmd *>::iterator it = commands.begin();
+-         it != commands.end(); 
++         it != commands.end();
+          it ++)
+     {
+          if (it->first == args[0]) {
+@@ -127,13 +129,24 @@
+ Console::show_all_commands(int argc, const char **argv, void *ctx)
+ {
+     Console *console = static_cast<Console *>(ctx);
++    int max_cmd_len = 0;
++    char strfmt[32];
++
++    for (std::map<std::string, ConsoleCmd *>::iterator it = console->commands.begin();
++         it != console->commands.end();
++         it ++)
++    {
++        if (it->first.length() > max_cmd_len)
++            max_cmd_len = it->first.length();
++    }
++    snprintf(strfmt, 32, "  %%-%ds  %%s\n", max_cmd_len);
+ 
+     printf("\nAvailable commands:\n\n");
+     for (std::map<std::string, ConsoleCmd *>::iterator it = console->commands.begin();
+-         it != console->commands.end(); 
++         it != console->commands.end();
+          it ++)
+     {
+-        printf("  %-15s %s\n", it->first.c_str(), it->second->desc.c_str());
++        printf(strfmt, it->first.c_str(), it->second->desc.c_str());
+     }
+     printf("\n");
+ }

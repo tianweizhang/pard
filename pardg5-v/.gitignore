@@ -1,0 +1,17 @@
+build/
+*.pyc
+parser.out
+parsetab.py
+m5out/
+m5spec
+*.out
+*.swp
+system/disks
+modules.order
+*.o
+*.d
+ignore/
+system/binaries/linux-2.6.28.4-GM
+ext
+src
+tests

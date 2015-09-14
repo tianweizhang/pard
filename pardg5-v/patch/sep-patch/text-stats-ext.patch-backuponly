@@ -1,0 +1,108 @@
+diff -r 13b5ba4be2f0 src/base/stats/text.cc
+--- a/src/base/stats/text.cc	Fri Apr 04 10:33:17 2014 +0800
++++ b/src/base/stats/text.cc	Fri Apr 25 11:18:14 2014 +0800
+@@ -46,6 +46,11 @@
+ #include <sstream>
+ #include <string>
+ 
++#include <sys/socket.h>
++#include <netinet/in.h>
++#include <sys/types.h>
++#include <netdb.h>
++
+ #include "base/stats/info.hh"
+ #include "base/stats/text.hh"
+ #include "base/cast.hh"
+@@ -136,10 +141,45 @@
+     return stream != NULL && stream->good();
+ }
+ 
++static int
++remote_connect(const char *host, const char *port, struct addrinfo hints)
++{
++    struct addrinfo *res, *res0;
++    int s, error;
++
++    if ((error = getaddrinfo(host, port, &hints, &res)))
++        panic("getaddrinfo: %s", gai_strerror(error));
++
++    res0 = res;
++    do {
++        if ((s = socket(res0->ai_family, res0->ai_socktype,
++                        res0->ai_protocol)) < 0)
++            continue;
++
++        if (connect(s, res0->ai_addr, res0->ai_addrlen) == 0)
++            break;
++
++        close(s);
++        s = -1;
++    } while ((res0 = res0->ai_next) != NULL);
++
++    freeaddrinfo(res);
++
++    return (s);
++}
++
++
+ void
+ Text::begin()
+ {
+     ccprintf(*stream, "\n---------- Begin Simulation Statistics ----------\n");
++
++    struct addrinfo hints;
++    memset(&hints, 0, sizeof(struct addrinfo));
++    hints.ai_family = AF_UNSPEC;
++    hints.ai_socktype = SOCK_STREAM;
++    hints.ai_protocol = IPPROTO_TCP;
++    sockfd = remote_connect("127.0.0.1", "2003", hints);
+ }
+ 
+ void
+@@ -147,6 +187,9 @@
+ {
+     ccprintf(*stream, "\n---------- End Simulation Statistics   ----------\n");
+     stream->flush();
++
++    close(sockfd);
++    sockfd = -1;
+ }
+ 
+ bool
+@@ -555,6 +598,24 @@
+         }
+     }
+ 
++    char buf[4096];
++    //static long long tick = time(NULL);
++    const char * match = "system.mem_ctrls.addr_mapper.bw_total";
++    if (strncmp(info.name.c_str(), match, strlen(match)) == 0) {
++        if (!info.subnames.empty()) {
++            for (off_type i = 0; i < size; ++i) {
++                if (!info.subnames[i].empty()) {
++                    snprintf(buf, 4096, "gem5test.bw_total.%s %lld %lld\n",
++                             info.subnames[i].c_str(),
++                             (long long int)(info.result()[i]), 
++                             (long long int)time(NULL));
++                    write(sockfd, buf, strlen(buf));
++                }
++            }
++        }
++        //tick++;
++    }
++
+     print(*stream);
+ }
+ 
+diff -r 13b5ba4be2f0 src/base/stats/text.hh
+--- a/src/base/stats/text.hh	Fri Apr 04 10:33:17 2014 +0800
++++ b/src/base/stats/text.hh	Fri Apr 25 11:18:14 2014 +0800
+@@ -46,6 +46,8 @@
+     bool mystream;
+     std::ostream *stream;
+ 
++    int sockfd;
++
+   protected:
+     bool noOutput(const Info &info);
+ 

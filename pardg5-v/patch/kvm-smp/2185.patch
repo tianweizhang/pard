@@ -1,0 +1,150 @@
+diff -r 0c1aba9ada6e -r 7bbf6b305377 src/sim/eventq.hh
+--- a/src/sim/eventq.hh	Thu Mar 06 16:01:08 2014 +0100
++++ b/src/sim/eventq.hh	Thu Mar 06 16:08:30 2014 +0100
+@@ -414,6 +414,28 @@
+     //! List of events added by other threads to this event queue.
+     std::list<Event*> async_queue;
+ 
++    /**
++     * Lock protecting event handling.
++     *
++     * This lock is always taken when servicing events. It is assumed
++     * that the thread scheduling new events (not asynchronous events
++     * though) have taken this lock. This is normally done by
++     * serviceOne() since new events are typically scheduled as a
++     * response to an earlier event.
++     *
++     * This lock is intended to be used to temporarily steal an event
++     * queue to support inter-thread communication when some
++     * deterministic timing can be sacrificed for speed. For example,
++     * the KVM CPU can use this support to access devices running in a
++     * different thread.
++     *
++     * @see EventQueue::ScopedMigration.
++     * @see EventQueue::ScopedRelease
++     * @see EventQueue::lock()
++     * @see EventQueue::unlock()
++     */
++    std::mutex service_mutex;
++
+     //! Insert / remove event from the queue. Should only be called
+     //! by thread operating this queue.
+     void insert(Event *event);
+@@ -427,6 +449,68 @@
+     EventQueue(const EventQueue &);
+ 
+   public:
++#ifndef SWIG
++    /**
++     * Temporarily migrate execution to a different event queue.
++     *
++     * An instance of this class temporarily migrates execution to a
++     * different event queue by releasing the current queue, locking
++     * the new queue, and updating curEventQueue(). This is can, for
++     * example, be useful when performing IO across thread event
++     * queues when timing is not crucial (e.g., during fast
++     * forwarding).
++     */
++    class ScopedMigration
++    {
++      public:
++        ScopedMigration(EventQueue *_new_eq)
++            :  new_eq(*_new_eq), old_eq(*curEventQueue())
++        {
++            old_eq.unlock();
++            new_eq.lock();
++            curEventQueue(&new_eq);
++        }
++
++        ~ScopedMigration()
++        {
++            new_eq.unlock();
++            old_eq.lock();
++            curEventQueue(&old_eq);
++        }
++
++      private:
++        EventQueue &new_eq;
++        EventQueue &old_eq;
++    };
++
++    /**
++     * Temporarily release the event queue service lock.
++     *
++     * There are cases where it is desirable to temporarily release
++     * the event queue lock to prevent deadlocks. For example, when
++     * waiting on the global barrier, we need to release the lock to
++     * prevent deadlocks from happening when another thread tries to
++     * temporarily take over the event queue waiting on the barrier.
++     */
++    class ScopedRelease
++    {
++      public:
++        ScopedRelease(EventQueue *_eq)
++            :  eq(*_eq)
++        {
++            eq.unlock();
++        }
++
++        ~ScopedRelease()
++        {
++            eq.lock();
++        }
++
++      private:
++        EventQueue &eq;
++    };
++#endif
++
+     EventQueue(const std::string &n);
+ 
+     virtual const std::string name() const { return objName; }
+@@ -491,6 +575,9 @@
+      */
+     Event* replaceHead(Event* s);
+ 
++    void lock() { service_mutex.lock(); }
++    void unlock() { service_mutex.unlock(); }
++
+ #ifndef SWIG
+     virtual void serialize(std::ostream &os);
+     virtual void unserialize(Checkpoint *cp, const std::string &section);
+diff -r 0c1aba9ada6e -r 7bbf6b305377 src/sim/eventq.cc
+--- a/src/sim/eventq.cc	Thu Mar 06 16:01:08 2014 +0100
++++ b/src/sim/eventq.cc	Thu Mar 06 16:08:30 2014 +0100
+@@ -203,6 +203,7 @@
+ Event *
+ EventQueue::serviceOne()
+ {
++    std::lock_guard<EventQueue> lock(*this);
+     Event *event = head;
+     Event *next = head->nextInBin;
+     event->flags.clear(Event::Scheduled);
+diff -r 0c1aba9ada6e -r 7bbf6b305377 src/sim/global_event.hh
+--- a/src/sim/global_event.hh	Thu Mar 06 16:01:08 2014 +0100
++++ b/src/sim/global_event.hh	Thu Mar 06 16:08:30 2014 +0100
+@@ -91,6 +91,11 @@
+ 
+         bool globalBarrier()
+         {
++            // The event queue will be locked upon entering this
++            // method. We need to unlock it to prevent deadlocks when
++            // if this thread is waiting on the barrier and another
++            // thread wants to lock the event queue.
++            EventQueue::ScopedRelease release(curEventQueue());
+             return _globalEvent->barrier->wait();
+         }
+ 
+diff -r 0c1aba9ada6e -r 7bbf6b305377 src/sim/simulate.cc
+--- a/src/sim/simulate.cc	Thu Mar 06 16:01:08 2014 +0100
++++ b/src/sim/simulate.cc	Thu Mar 06 16:08:30 2014 +0100
+@@ -198,6 +198,9 @@
+         }
+ 
+         if (async_event && testAndClearAsyncEvent()) {
++            // Take the event queue lock in case any of the service
++            // routines want to schedule new events.
++            std::lock_guard<EventQueue> lock(*eventq);
+             async_event = false;
+             if (async_statdump || async_statreset) {
+                 Stats::schedStatEvent(async_statdump, async_statreset);

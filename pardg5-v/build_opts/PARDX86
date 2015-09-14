@@ -1,0 +1,4 @@
+TARGET_ISA = 'x86'
+CPU_MODELS = 'TimingSimpleCPU,O3CPU,AtomicSimpleCPU'
+ENABLE_PARD = True
+PROTOCOL = 'MESI_Two_Level'

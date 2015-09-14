@@ -1,0 +1,222 @@
+diff -r 9c55c0214404 src/arch/x86/cpuid.cc
+--- a/src/arch/x86/cpuid.cc	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/arch/x86/cpuid.cc	Thu Feb 27 09:54:41 2014 +0800
+@@ -48,12 +48,12 @@
+         L1CacheAndTLB,
+         L2L3CacheAndL2TLB,
+         APMInfo,
++        LongModeAddressSize,
+  
+         /*
+          * The following are defined by the spec but not yet implemented
+          */
+-/*      LongModeAddressSize,
+-        // Function 9 is reserved
++/*      // Function 9 is reserved
+         SVMInfo = 10,
+         // Functions 11-24 are reserved
+         TLB1GBPageInfo = 25,
+@@ -130,8 +130,11 @@
+                 result = CpuidResult(0x80000018, 0x68747541,
+                                      0x69746e65, 0x444d4163);
+                 break;
+-/*            case LongModeAddressSize:
+-              case SVMInfo:
++              case LongModeAddressSize:
++                result = CpuidResult(0x0000ffff, 0x00000000,
++                                     0x00000000, 0x00000000);
++                break;
++/*            case SVMInfo:
+               case TLB1GBPageInfo:
+               case PerformanceInfo:*/
+               default:
+diff -r 9c55c0214404 src/arch/x86/isa/decoder/two_byte_opcodes.isa
+--- a/src/arch/x86/isa/decoder/two_byte_opcodes.isa	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/arch/x86/isa/decoder/two_byte_opcodes.isa	Thu Feb 27 09:54:41 2014 +0800
+@@ -348,6 +348,8 @@
+                         0x1: MOV(Rd,Dd);
+                         0x2: MOV(Cd,Rd);
+                         0x3: MOV(Dd,Rd);
++                        0x4: MOV(Rd, QRd);
++                        0x6: MOV(QRd, Rd);
+                         default: UD2();
+                     }
+                     default: UD2();
+diff -r 9c55c0214404 src/arch/x86/isa/insts/general_purpose/data_transfer/move.py
+--- a/src/arch/x86/isa/insts/general_purpose/data_transfer/move.py	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/arch/x86/isa/insts/general_purpose/data_transfer/move.py	Thu Feb 27 09:54:41 2014 +0800
+@@ -196,6 +196,18 @@
+     rddr reg, regm
+ };
+ 
++def macroop MOV_R_QR {
++    .serializing
++    .adjust_env maxOsz
++    rdqr reg, regm
++};
++
++def macroop MOV_QR_R {
++    .serializing
++    .adjust_env maxOsz
++    wrqr reg, regm
++};
++
+ def macroop MOV_R_S {
+     rdsel reg, regm
+ };
+diff -r 9c55c0214404 src/arch/x86/isa/microops/regop.isa
+--- a/src/arch/x86/isa/microops/regop.isa	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/arch/x86/isa/microops/regop.isa	Thu Feb 27 09:54:41 2014 +0800
+@@ -1693,4 +1693,34 @@
+         code = '''
+             DestReg = X86ISA::convX87TagsToXTags(FTW);
+         '''
++
++    class Rdqr(RegOp):
++        def __init__(self, dest, src1, flags=None, dataSize="env.dataSize"):
++            super(Rdqr, self).__init__(dest, \
++                    src1, "InstRegIndex(NUM_INTREGS)", flags, dataSize)
++        rdqrCode = '''
++            if (src1 >1) {
++                fault = new InvalidOpcode();
++            } else {
++                %s
++            }
++        '''
++        code = rdqrCode % "DestReg = merge(DestReg, QoSSrc1, dataSize);"
++        big_code = rdqrCode % "DestReg = QoSSrc1 & mask(dataSize * 8);"
++
++    class Wrqr(RegOp):
++        def __init__(self, dest, src1, flags=None, dataSize="env.dataSize"):
++            super(Wrqr, self).__init__(dest, \
++                    src1, "InstRegIndex(NUM_INTREGS)", flags, dataSize)
++        code = '''
++            if (dest > 1) {
++                fault = new InvalidOpcode();
++            } else {
++                HandyM5Reg m5reg = M5Reg;
++                // QoS only worked in protected-mode with CPL==0
++                if (!m5reg.prot || m5reg.cpl>0)
++                    fault = new GeneralProtection(0);
++                QoSDest = psrc1;
++            }
++        '''
+ }};
+diff -r 9c55c0214404 src/arch/x86/isa/operands.isa
+--- a/src/arch/x86/isa/operands.isa	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/arch/x86/isa/operands.isa	Thu Feb 27 09:54:41 2014 +0800
+@@ -187,6 +187,9 @@
+         'SegAttrDest':   squashCSReg('MISCREG_SEG_ATTR(dest)', 110),
+         'SegAttrSrc1':   controlReg('MISCREG_SEG_ATTR(src1)', 111),
+ 
++        'QoSDest':       controlReg('MISCREG_QR(dest)', 112),
++        'QoSSrc1':       controlReg('MISCREG_QR(src1)', 113),
++
+         # Operands to access specific control registers directly.
+         'EferOp':        squashCReg('MISCREG_EFER', 200),
+         'CR4Op':         controlReg('MISCREG_CR4', 201),
+@@ -202,6 +205,7 @@
+         'MiscRegSrc1':   controlReg('src1', 211),
+         'TscOp':         controlReg('MISCREG_TSC', 212),
+         'M5Reg':         squashCReg('MISCREG_M5_REG', 213),
++        'QR0Op':         controlReg('MISCREG_QR0', 214),
+         'Mem':           ('Mem', 'uqw', None, \
+                           ('IsMemRef', 'IsLoad', 'IsStore'), 300)
+ }};
+diff -r 9c55c0214404 src/arch/x86/isa/specialize.isa
+--- a/src/arch/x86/isa/specialize.isa	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/arch/x86/isa/specialize.isa	Thu Feb 27 09:54:41 2014 +0800
+@@ -172,6 +172,12 @@
+                 env.addToDisassembly(
+                         "ccprintf(out, \"DR%%d\", %s);\n" % ModRMRegIndex)
+                 Name += "_D"
++            elif opType.tag == "QR":
++                # A QoS register indexed by the "reg" field
++                env.addReg(ModRMRegIndex);
++                env.addToDisassembly(
++                        "ccprintf(out, \"QR%%d\", %s);\n" % ModRMRegIndex)
++                Name += "_QR"
+             elif opType.tag == "S":
+                 # A segment selector register indexed by the "reg" field
+                 env.addReg(ModRMRegIndex)
+diff -r 9c55c0214404 src/arch/x86/pagetable_walker.cc
+--- a/src/arch/x86/pagetable_walker.cc	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/arch/x86/pagetable_walker.cc	Thu Feb 27 09:54:41 2014 +0800
+@@ -243,14 +243,17 @@
+         sendPackets();
+     } else {
+         do {
++            read->setQosTag(tc->readMiscRegNoEffect(TheISA::MISCREG_QR0)|0xe000000000000000);
+             walker->port.sendAtomic(read);
+             PacketPtr write = NULL;
+             fault = stepWalk(write);
+             assert(fault == NoFault || read == NULL);
+             state = nextState;
+             nextState = Ready;
+-            if (write)
++            if (write) {
++                write->setQosTag(tc->readMiscRegNoEffect(TheISA::MISCREG_QR0)|0xe000000000000000);
+                 walker->port.sendAtomic(write);
++            }
+         } while(read);
+         state = Ready;
+         nextState = Waiting;
+@@ -667,6 +670,7 @@
+         PacketPtr pkt = read;
+         read = NULL;
+         inflight++;
++        pkt->setQosTag(tc->readMiscRegNoEffect(TheISA::MISCREG_QR0)|0xe000000000000000);
+         if (!walker->sendTiming(this, pkt)) {
+             retrying = true;
+             read = pkt;
+@@ -679,6 +683,7 @@
+         PacketPtr write = writes.back();
+         writes.pop_back();
+         inflight++;
++        write->setQosTag(tc->readMiscRegNoEffect(TheISA::MISCREG_QR0)|0xe000000000000000);
+         if (!walker->sendTiming(this, write)) {
+             retrying = true;
+             writes.push_back(write);
+diff -r 9c55c0214404 src/arch/x86/regs/misc.hh
+--- a/src/arch/x86/regs/misc.hh	Mon Feb 24 20:50:06 2014 -0600
++++ b/src/arch/x86/regs/misc.hh	Thu Feb 27 09:54:41 2014 +0800
+@@ -137,6 +137,13 @@
+         //Register to keep handy values like the CPU mode in.
+         MISCREG_M5_REG,
+ 
++        // Register to keep QoS information
++        MISCREG_QR_BASE,
++        MISCREG_QR0 = MISCREG_QR_BASE,
++        MISCREG_QR1,
++        MISCREG_QR2,
++        MISCREG_QR3,
++
+         /*
+          * Model Specific Registers
+          */
+@@ -414,6 +421,13 @@
+     }
+ 
+     static inline MiscRegIndex
++    MISCREG_QR(int index)
++    {
++        assert(index >= 0 && index < 4);
++        return (MiscRegIndex)(MISCREG_QR_BASE + index);
++    }
++
++    static inline MiscRegIndex
+     MISCREG_MTRR_PHYS_BASE(int index)
+     {
+         assert(index >= 0 && index < (MISCREG_MTRR_PHYS_BASE_END -
+@@ -579,6 +593,11 @@
+         Bitfield<17, 16> stack;
+     EndBitUnion(HandyM5Reg)
+ 
++    BitUnion64(QR0)
++        Bitfield<3,0> qoscls;
++        Bitfield<15,4> priority;
++    EndBitUnion(QR0)
++
+     /**
+      * Control registers
+      */

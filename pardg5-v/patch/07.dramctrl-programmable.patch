@@ -1,0 +1,1417 @@
+exporting patches:
+# HG changeset patch
+# User Jiuyue Ma <majiuyue@ncic.ac.cn>
+# Date 1405391356 -28800
+# Node ID f6953126b70e2a0267236645193dfe2f65a3595d
+# Parent  61764db3e099a9761d3b49a5420a1247029a8fb9
+mem: add stats (rowhit, latency) for each ldom
+
+diff -r 61764db3e099 -r f6953126b70e src/mem/dram_ctrl.cc
+--- a/src/mem/dram_ctrl.cc	Mon Jul 14 10:13:49 2014 +0800
++++ b/src/mem/dram_ctrl.cc	Tue Jul 15 10:29:16 2014 +0800
+@@ -63,7 +63,7 @@
+     prechargeEvent(this), refreshEvent(this), powerEvent(this),
+ #ifdef ENABLE_PARD
+     tlb(), dispatchs(32),
+-    stats(sizeof(struct DRAMCtrlStats)/sizeof(uint64_t), 32), 
++    stats(sizeof(struct DRAMCtrlStats)/sizeof(uint64_t), 32),
+     triggers(stats, 32),
+ #endif
+     drainManager(NULL),
+@@ -147,6 +147,17 @@
+         fatal("tREFI (%d) must be larger than tRP (%d) and tRFC (%d)\n",
+               tREFI, tRP, tRFC);
+     }
++
++    #ifdef ENABLE_PARD
++    DPRINTFN("PARD: Initialize priority...\n");
++    DPRINTFN("       \tPriority\tEffective\n");
++    for (int i=0; i<4; i++) {
++        dispatchs[i].priority = i;
++        dispatchs[i].effective_priority = dispatchs[i].priority;
++        DPRINTFN("LDom#%d\t%d\t%d\n", i,
++                 dispatchs[i].priority, dispatchs[i].effective_priority);
++    }
++    #endif
+ }
+ 
+ void
+@@ -339,6 +350,7 @@
+         readBursts++;
+         #ifdef ENABLE_PARD
+         PARD_STATS(pkt)->readBursts++;
++        readBurstsPerLDom[QOSTAG_TO_LDOMID(pkt->getQosTag())]++;
+         #endif
+ 
+         // First check write buffer to see if the data is already at
+@@ -358,6 +370,7 @@
+                 #ifdef ENABLE_PARD
+                 PARD_STATS(pkt)->servicedByWrQ++;
+                 PARD_STATS(pkt)->bytesReadWrQ += burstSize;
++                servicedByWrQPerLDom[QOSTAG_TO_LDOMID(pkt->getQosTag())]++;
+                 #endif
+                 break;
+             }
+@@ -726,9 +739,25 @@
+     bool found_earliest_pkt = false;
+     auto selected_pkt_it = queue.begin();
+ 
++/*
++    #ifdef ENABLE_PARD
++    // Determine priority when scheduling
++    int priority = MAX_PRIORITY;
++    #endif
++*/
++
+     for (auto i = queue.begin(); i != queue.end() ; ++i) {
+         DRAMPacket* dram_pkt = *i;
+         const Bank& bank = dram_pkt->bankRef;
++/*
++        #ifdef ENABLE_PARD
++        // check priority, always select higher effective priority
++        if (dispatchs[QOSTAG_TO_LDOMID(dram_pkt->qosTag)].effective_priority
++              > priority)
++            continue;
++        priority = dispatchs[QOSTAG_TO_LDOMID(dram_pkt->qosTag)].effective_priority;
++        #endif
++*/
+         // Check if it is a row hit
+         if (bank.openRow == dram_pkt->row) {
+             // FCFS within the hits
+@@ -1087,6 +1116,9 @@
+         PARD_STATS_DRAMPKT(dram_pkt)->totMemAccLat += dram_pkt->readyTime - dram_pkt->entryTime;
+         PARD_STATS_DRAMPKT(dram_pkt)->totBusLat += tBURST;
+         PARD_STATS_DRAMPKT(dram_pkt)->totQLat += cmd_at - dram_pkt->entryTime;
++
++        totMemAccLatPerLDom[QOSTAG_TO_LDOMID(dram_pkt->qosTag)] += dram_pkt->readyTime - dram_pkt->entryTime;
++        totQLatPerLDom[QOSTAG_TO_LDOMID(dram_pkt->qosTag)] += cmd_at - dram_pkt->entryTime;
+         #endif
+     } else {
+         ++writesThisTime;
+@@ -1511,7 +1543,7 @@
+     DRAMCtrlStats *stats = (DRAMCtrlStats *)_stats;
+     DRAMCtrl *ctrl = (DRAMCtrl *)args;
+ 
+-    stats->avgQLat      = stats->totQLat / (stats->readBursts - stats->servicedByWrQ); 
++    stats->avgQLat      = stats->totQLat / (stats->readBursts - stats->servicedByWrQ);
+     stats->avgBusLat    = stats->totBusLat / (stats->readBursts - stats->servicedByWrQ);
+     stats->avgMemAccLat = stats->totMemAccLat / (stats->readBursts - stats->servicedByWrQ);
+     stats->readRowHitRate  = (stats->readRowHits / (stats->readBursts - stats->servicedByWrQ)) * 100;
+@@ -1623,6 +1655,50 @@
+ 
+     avgMemAccLat = totMemAccLat / (readBursts - servicedByWrQ);
+ 
++    #ifdef ENABLE_PARD
++    readBurstsPerLDom
++        .init(4)
++        .name(name() + ".readBurstsPerLDom")
++        .desc("Number of DRAM read bursts, "
++              "including those serviced by the write queue")
++        .flags(total);
++    servicedByWrQPerLDom
++        .init(4)
++        .name(name() + ".servicedByWrQPerLDom")
++        .desc("Number of DRAM read bursts serviced by the write queue")
++        .flags(total);
++    totMemAccLatPerLDom
++        .init(4)
++        .name(name() + ".totMemAccLatPerLDom")
++        .desc("Total ticks spent from burst creation until serviced "
++              "by the DRAM")
++        .flags(total);
++    totQLatPerLDom
++        .init(4)
++        .name(name() + ".totQLatPerLDom")
++        .desc("Total ticks spent queuing");
++    avgMemAccLatPerLDom
++        .name(name() + ".avgMemAccLatPerLDom")
++        .desc("Average memory access latency per DRAM burst")
++        .precision(2);
++    avgMemAccLatPerLDom = totMemAccLatPerLDom / (readBurstsPerLDom - servicedByWrQPerLDom);
++    avgQLatPerLDom
++        .name(name() + ".avgQLatPerLDom")
++        .desc("Average queueing delay per DRAM burst")
++        .precision(2);
++    avgQLatPerLDom = totQLatPerLDom / (readBurstsPerLDom - servicedByWrQPerLDom);
++
++
++    for (int i = 0; i < 4; i++) {
++        readBurstsPerLDom.subname(i, csprintf("LDom#%d", i));
++        servicedByWrQPerLDom.subname(i, csprintf("LDom#%d", i));
++        totMemAccLatPerLDom.subname(i, csprintf("LDom#%d", i));
++        totQLatPerLDom.subname(i, csprintf("LDom#%d", i));
++        avgMemAccLatPerLDom.subname(i, csprintf("LDom#%d", i));
++        avgQLatPerLDom.subname(i, csprintf("LDom#%d", i));
++    }
++    #endif
++
+     numRdRetry
+         .name(name() + ".numRdRetry")
+         .desc("Number of times read queue was full causing retry");
+diff -r 61764db3e099 -r f6953126b70e src/mem/dram_ctrl.hh
+--- a/src/mem/dram_ctrl.hh	Mon Jul 14 10:13:49 2014 +0800
++++ b/src/mem/dram_ctrl.hh	Tue Jul 15 10:29:16 2014 +0800
+@@ -489,17 +489,17 @@
+         uint64_t totGap;
+         uint64_t rdQLen;
+         uint64_t wrQLen;
+-    
++
+         // Latencies summed over all requests
+         uint64_t totQLat;
+         uint64_t totMemAccLat;
+         uint64_t totBusLat;
+-    
++
+         // Average latencies per request
+         uint64_t avgQLat;
+         uint64_t avgBusLat;
+         uint64_t avgMemAccLat;
+-    
++
+         // Average bandwidth
+         uint64_t avgRdBW;
+         uint64_t avgWrBW;
+@@ -509,7 +509,7 @@
+         uint64_t busUtil;
+         uint64_t busUtilRead;
+         uint64_t busUtilWrite;
+-    
++
+         // Row hit count and rate
+         uint64_t readRowHits;
+         uint64_t writeRowHits;
+@@ -740,6 +740,16 @@
+     Stats::Formula avgBusLat;
+     Stats::Formula avgMemAccLat;
+ 
++    #ifdef ENABLE_PARD
++    // Latencies per Logical domain
++    Stats::Vector readBurstsPerLDom;
++    Stats::Vector servicedByWrQPerLDom;
++    Stats::Vector totMemAccLatPerLDom;
++    Stats::Vector totQLatPerLDom;
++    Stats::Formula avgMemAccLatPerLDom;
++    Stats::Formula avgQLatPerLDom;
++    #endif
++
+     // Average bandwidth
+     Stats::Formula avgRdBW;
+     Stats::Formula avgWrBW;
+# HG changeset patch
+# User Jiuyue Ma <majiuyue@ncic.ac.cn>
+# Date 1405675829 -28800
+# Node ID 9e09f3646f8bd72c24f700d1237432886da3eb15
+# Parent  f6953126b70e2a0267236645193dfe2f65a3595d
+mem: add programmable multiple row buffer
+
+diff -r f6953126b70e -r 9e09f3646f8b src/mem/dram_ctrl.cc
+--- a/src/mem/dram_ctrl.cc	Tue Jul 15 10:29:16 2014 +0800
++++ b/src/mem/dram_ctrl.cc	Fri Jul 18 17:30:29 2014 +0800
+@@ -61,7 +61,7 @@
+     busState(READ),
+     nextReqEvent(this), respondEvent(this), activateEvent(this),
+     prechargeEvent(this), refreshEvent(this), powerEvent(this),
+-#ifdef ENABLE_PARD
++#if (ENABLE_PARD)
+     tlb(), dispatchs(32),
+     stats(sizeof(struct DRAMCtrlStats)/sizeof(uint64_t), 32),
+     triggers(stats, 32),
+@@ -147,17 +147,6 @@
+         fatal("tREFI (%d) must be larger than tRP (%d) and tRFC (%d)\n",
+               tREFI, tRP, tRFC);
+     }
+-
+-    #ifdef ENABLE_PARD
+-    DPRINTFN("PARD: Initialize priority...\n");
+-    DPRINTFN("       \tPriority\tEffective\n");
+-    for (int i=0; i<4; i++) {
+-        dispatchs[i].priority = i;
+-        dispatchs[i].effective_priority = dispatchs[i].priority;
+-        DPRINTFN("LDom#%d\t%d\t%d\n", i,
+-                 dispatchs[i].priority, dispatchs[i].effective_priority);
+-    }
+-    #endif
+ }
+ 
+ void
+@@ -317,12 +306,28 @@
+     DPRINTF(DRAM, "Address: %lld Rank %d Bank %d Row %d\n",
+             dramPktAddr, rank, bank, row);
+ 
++    #if (ENABLE_PARD)
++    // select a row buffer according to qos tag and dispatch table
++    LDomID ldomID = QOSTAG_TO_LDOMID(pkt->getQosTag());
++    assert(ldomID < dispatchs.size());
++    int rowbuf;
++    for (rowbuf=0; rowbuf<Bank::ROW_BUFFER_COUNT; rowbuf++)
++        if (1<<rowbuf & dispatchs[ldomID].rowbuf_mask)
++            break;
++    assert(rowbuf < Bank::ROW_BUFFER_COUNT);
++    #endif
++
+     // create the corresponding DRAM packet with the entry time and
+     // ready time set to the current tick, the latter will be updated
+     // later
+     uint16_t bank_id = banksPerRank * rank + bank;
++    #if (ENABLE_PARD)
++    return new DRAMPacket(pkt, isRead, rank, bank, row, bank_id, dramPktAddr,
++                          size, banks[rank][bank], rowbuf);
++    #else
+     return new DRAMPacket(pkt, isRead, rank, bank, row, bank_id, dramPktAddr,
+                           size, banks[rank][bank]);
++    #endif
+ }
+ 
+ void
+@@ -348,7 +353,7 @@
+                         pkt->getAddr() + pkt->getSize()) - addr;
+         readPktSize[ceilLog2(size)]++;
+         readBursts++;
+-        #ifdef ENABLE_PARD
++        #if (ENABLE_PARD)
+         PARD_STATS(pkt)->readBursts++;
+         readBurstsPerLDom[QOSTAG_TO_LDOMID(pkt->getQosTag())]++;
+         #endif
+@@ -367,7 +372,7 @@
+                 DPRINTF(DRAM, "Read to addr %lld with size %d serviced by "
+                         "write queue\n", addr, size);
+                 bytesReadWrQ += burstSize;
+-                #ifdef ENABLE_PARD
++                #if (ENABLE_PARD)
+                 PARD_STATS(pkt)->servicedByWrQ++;
+                 PARD_STATS(pkt)->bytesReadWrQ += burstSize;
+                 servicedByWrQPerLDom[QOSTAG_TO_LDOMID(pkt->getQosTag())]++;
+@@ -399,7 +404,7 @@
+ 
+             // Update stats
+             avgRdQLen = readQueue.size() + respQueue.size();
+-            #ifdef ENABLE_PARD
++            #if (ENABLE_PARD)
+             PARD_STATS(pkt)->rdQLen = readQueue.size() + respQueue.size();
+             #endif
+         }
+@@ -441,8 +446,9 @@
+                         pkt->getAddr() + pkt->getSize()) - addr;
+         writePktSize[ceilLog2(size)]++;
+         writeBursts++;
+-        #ifdef ENABLE_PARD
++        #if (ENABLE_PARD)
+         PARD_STATS(pkt)->writeBursts++;
++        writeBurstsPerLDom[QOSTAG_TO_LDOMID(pkt->getQosTag())]++;
+         #endif
+ 
+         // see if we can merge with an existing item in the write
+@@ -518,15 +524,16 @@
+ 
+             // Update stats
+             avgWrQLen = writeQueue.size();
+-            #ifdef ENABLE_PARD
++            #if (ENABLE_PARD)
+             PARD_STATS(pkt)->wrQLen = writeQueue.size();
+             #endif
+         } else {
+             // keep track of the fact that this burst effectively
+             // disappeared as it was merged with an existing one
+             mergedWrBursts++;
+-            #ifdef ENABLE_PARD
++            #if (ENABLE_PARD)
+             PARD_STATS(pkt)->mergedWrBursts++;
++            mergedWrBurstsPerLDom[QOSTAG_TO_LDOMID(pkt->getQosTag())]++;
+             #endif
+         }
+ 
+@@ -588,7 +595,7 @@
+     // Calc avg gap between requests
+     if (prevArrival != 0) {
+         totGap += curTick() - prevArrival;
+-        #ifdef ENABLE_PARD
++        #if (ENABLE_PARD)
+         PARD_STATS(pkt)->totGap += curTick() - prevArrival;
+         #endif
+     }
+@@ -611,7 +618,7 @@
+             // remember that we have to retry this port
+             retryRdReq = true;
+             numRdRetry++;
+-            #ifdef ENABLE_PARD
++            #if (ENABLE_PARD)
+             PARD_STATS(pkt)->numRdRetry++;
+             #endif
+             return false;
+@@ -619,7 +626,7 @@
+             addToReadQueue(pkt, dram_pkt_count);
+             readReqs++;
+             bytesReadSys += size;
+-            #ifdef ENABLE_PARD
++            #if (ENABLE_PARD)
+             PARD_STATS(pkt)->readReqs++;
+             PARD_STATS(pkt)->bytesReadSys += size;
+             #endif
+@@ -631,7 +638,7 @@
+             // remember that we have to retry this port
+             retryWrReq = true;
+             numWrRetry++;
+-            #ifdef ENABLE_PARD
++            #if (ENABLE_PARD)
+             PARD_STATS(pkt)->numWrRetry++;
+             #endif
+             return false;
+@@ -639,7 +646,7 @@
+             addToWriteQueue(pkt, dram_pkt_count);
+             writeReqs++;
+             bytesWrittenSys += size;
+-            #ifdef ENABLE_PARD
++            #if (ENABLE_PARD)
+             PARD_STATS(pkt)->writeReqs++;
+             PARD_STATS(pkt)->bytesWrittenSys += size;
+             #endif
+@@ -647,7 +654,7 @@
+     } else {
+         DPRINTF(DRAM,"Neither read nor write, ignore timing\n");
+         neitherReadNorWrite++;
+-        #ifdef ENABLE_PARD
++        #if (ENABLE_PARD)
+         PARD_STATS(pkt)->neitherReadNorWrite++;
+         #endif
+         accessAndRespond(pkt, 1);
+@@ -739,27 +746,29 @@
+     bool found_earliest_pkt = false;
+     auto selected_pkt_it = queue.begin();
+ 
+-/*
+-    #ifdef ENABLE_PARD
++    #if (ENABLE_PARD)
+     // Determine priority when scheduling
+     int priority = MAX_PRIORITY;
+     #endif
+-*/
+ 
+     for (auto i = queue.begin(); i != queue.end() ; ++i) {
+         DRAMPacket* dram_pkt = *i;
+         const Bank& bank = dram_pkt->bankRef;
+-/*
+-        #ifdef ENABLE_PARD
++
++        #if (ENABLE_PARD)
+         // check priority, always select higher effective priority
+         if (dispatchs[QOSTAG_TO_LDOMID(dram_pkt->qosTag)].effective_priority
+               > priority)
+             continue;
+         priority = dispatchs[QOSTAG_TO_LDOMID(dram_pkt->qosTag)].effective_priority;
+         #endif
+-*/
++
+         // Check if it is a row hit
++        #if (ENABLE_PARD)
++        if (bank.openRow[dram_pkt->rowbuf] == dram_pkt->row) {
++        #else
+         if (bank.openRow == dram_pkt->row) {
++        #endif
+             // FCFS within the hits
+             DPRINTF(DRAM, "Row buffer hit\n");
+             selected_pkt_it = i;
+@@ -769,12 +778,24 @@
+             if (earliest_banks == 0)
+                 earliest_banks = minBankActAt(queue);
+ 
++            /** TODO:
++             * we only get earliest_banks, but not the earliest_row_buffer
++             * in bank, so how to deal with this?
++             * Jiuyue
++             */
++
+             // simplistic approximation of when the bank can issue an
+             // activate, this is calculated in minBankActAt and could
+             // be cached
++            #if (ENABLE_PARD)
++            Tick act_at = (bank.openRow[dram_pkt->rowbuf] == Bank::NO_ROW) ?
++                bank.actAllowedAt :
++                std::max(bank.preAllowedAt, curTick()) + tRP;
++            #else
+             Tick act_at = bank.openRow == Bank::NO_ROW ?
+                 bank.actAllowedAt :
+                 std::max(bank.preAllowedAt, curTick()) + tRP;
++            #endif
+ 
+             // Bank is ready or is the first available bank
+             if (act_at <= curTick() ||
+@@ -824,9 +845,15 @@
+     return;
+ }
+ 
++#if (!ENABLE_PARD)
+ void
+ DRAMCtrl::activateBank(Tick act_tick, uint8_t rank, uint8_t bank,
+                        uint16_t row, Bank& bank_ref)
++#else
++void
++DRAMCtrl::activateBank(Tick act_tick, uint8_t rank, uint8_t bank,
++                       uint16_t row, int rowbuf, Bank& bank_ref)
++#endif
+ {
+     assert(0 <= rank && rank < ranksPerChannel);
+     assert(actTicks[rank].size() == activationLimit);
+@@ -834,8 +861,8 @@
+     DPRINTF(DRAM, "Activate at tick %d\n", act_tick);
+ 
+     // update the open row
+-    assert(bank_ref.openRow == Bank::NO_ROW);
+-    bank_ref.openRow = row;
++    assert(bank_ref.openRow[rowbuf] == Bank::NO_ROW);
++    bank_ref.openRow[rowbuf] = row;
+ 
+     // start counting anew, this covers both the case when we
+     // auto-precharged, and when this access is forced to
+@@ -843,7 +870,19 @@
+     bank_ref.bytesAccessed = 0;
+     bank_ref.rowAccesses = 0;
+ 
++    #if (ENABLE_PARD)
++    /**
++     * Because we have multiple row buffer in a bank, to maintain active bank
++     * number, we first increase active row buffer counter, if it is the first
++     * active row buffer, increase active bank counter.
++     */
++    ++bank_ref.numRowsActive;
++    assert(bank_ref.numRowsActive <= Bank::ROW_BUFFER_COUNT);
++    if (bank_ref.numRowsActive == 1)
++        ++numBanksActive;
++    #else
+     ++numBanksActive;
++    #endif
+     assert(numBanksActive <= banksPerRank * ranksPerChannel);
+ 
+     DPRINTF(DRAM, "Activate bank at tick %lld, now got %d active\n",
+@@ -915,16 +954,20 @@
+ }
+ 
+ void
++#if (!ENABLE_PARD)
+ DRAMCtrl::prechargeBank(Bank& bank, Tick pre_at)
++#else
++DRAMCtrl::prechargeBank(Bank& bank, int rowbuf, Tick pre_at)
++#endif
+ {
+     // make sure the bank has an open row
+-    assert(bank.openRow != Bank::NO_ROW);
++    assert(bank.openRow[rowbuf] != Bank::NO_ROW);
+ 
+     // sample the bytes per activate here since we are closing
+     // the page
+     bytesPerActivate.sample(bank.bytesAccessed);
+ 
+-    bank.openRow = Bank::NO_ROW;
++    bank.openRow[rowbuf] = Bank::NO_ROW;
+ 
+     // no precharge allowed before this one
+     bank.preAllowedAt = pre_at;
+@@ -933,8 +976,21 @@
+ 
+     bank.actAllowedAt = std::max(bank.actAllowedAt, pre_done_at);
+ 
++    #if (ENABLE_PARD)
++    /**
++     * Same as ++numBanksActive, we first decrease active row counter, if
++     * it drops to 0, decrease active bank counter.
++     */
++    assert(bank.numRowsActive != 0);
++    --bank.numRowsActive;
++    if (bank.numRowsActive == 0) {
++        assert(numBanksActive != 0);
++        --numBanksActive;
++    }
++    #else
+     assert(numBanksActive != 0);
+     --numBanksActive;
++    #endif
+ 
+     DPRINTF(DRAM, "Precharging bank at tick %lld, now got %d active\n",
+             pre_at, numBanksActive);
+@@ -966,8 +1022,15 @@
+ void
+ DRAMCtrl::doDRAMAccess(DRAMPacket* dram_pkt)
+ {
++    #if (ENABLE_PARD)
++    DPRINTF(DRAM, "Timing access to addr %lld, rank/bank/row %d %d %d, "
++                  "using row buffer #%d\n",
++            dram_pkt->addr, dram_pkt->rank, dram_pkt->bank, dram_pkt->row,
++            dram_pkt->rowbuf);
++    #else
+     DPRINTF(DRAM, "Timing access to addr %lld, rank/bank/row %d %d %d\n",
+             dram_pkt->addr, dram_pkt->rank, dram_pkt->bank, dram_pkt->row);
++    #endif
+ 
+     // get the bank
+     Bank& bank = dram_pkt->bankRef;
+@@ -978,16 +1041,27 @@
+     // respect any constraints on the command (e.g. tRCD or tCCD)
+     Tick cmd_at = std::max(bank.colAllowedAt, curTick());
+ 
+-    // Determine the access latency and update the bank state
+-    if (bank.openRow == dram_pkt->row) {
++    #if (ENABLE_PARD)
++    if (bank.openRow[dram_pkt->rowbuf] == dram_pkt->row)
++    #else
++    if (bank.openRow == dram_pkt->row)
++    #endif
++    {
+         // nothing to do
+     } else {
+         row_hit = false;
+ 
+         // If there is a page open, precharge it.
++        #if (ENABLE_PARD)
++        if (bank.openRow[dram_pkt->rowbuf] != Bank::NO_ROW) {
++            prechargeBank(bank, dram_pkt->rowbuf,
++                          std::max(bank.preAllowedAt, curTick()));
++        }
++        #else
+         if (bank.openRow != Bank::NO_ROW) {
+             prechargeBank(bank, std::max(bank.preAllowedAt, curTick()));
+         }
++        #endif
+ 
+         // next we need to account for the delay in activating the
+         // page
+@@ -995,8 +1069,13 @@
+ 
+         // Record the activation and deal with all the global timing
+         // constraints caused be a new activation (tRRD and tXAW)
++        #if (ENABLE_PARD)
++        activateBank(act_tick, dram_pkt->rank, dram_pkt->bank,
++                     dram_pkt->row, dram_pkt->rowbuf, bank);
++        #else
+         activateBank(act_tick, dram_pkt->rank, dram_pkt->bank,
+                      dram_pkt->row, bank);
++        #endif
+ 
+         // issue the command as early as possible
+         cmd_at = bank.colAllowedAt;
+@@ -1079,7 +1158,7 @@
+     // if this access should use auto-precharge, then we are
+     // closing the row
+     if (auto_precharge) {
+-        prechargeBank(bank, std::max(curTick(), bank.preAllowedAt));
++        prechargeBank(bank, dram_pkt->rowbuf, std::max(curTick(), bank.preAllowedAt));
+ 
+         DPRINTF(DRAM, "Auto-precharged bank: %d\n", dram_pkt->bankId);
+     }
+@@ -1109,9 +1188,11 @@
+         totBusLat += tBURST;
+         totQLat += cmd_at - dram_pkt->entryTime;
+ 
+-        #ifdef ENABLE_PARD
+-        if (row_hit)
++        #if (ENABLE_PARD)
++        if (row_hit) {
+             PARD_STATS_DRAMPKT(dram_pkt)->readRowHits++;
++            readRowHitsPerLDom[QOSTAG_TO_LDOMID(dram_pkt->qosTag)] ++;
++        }
+         PARD_STATS_DRAMPKT(dram_pkt)->bytesReadDRAM += burstSize;
+         PARD_STATS_DRAMPKT(dram_pkt)->totMemAccLat += dram_pkt->readyTime - dram_pkt->entryTime;
+         PARD_STATS_DRAMPKT(dram_pkt)->totBusLat += tBURST;
+@@ -1127,9 +1208,11 @@
+         bytesWritten += burstSize;
+         perBankWrBursts[dram_pkt->bankId]++;
+ 
+-        #ifdef ENABLE_PARD
+-        if (row_hit)
++        #if (ENABLE_PARD)
++        if (row_hit) {
+             PARD_STATS_DRAMPKT(dram_pkt)->writeRowHits++;
++            writeRowHitsPerLDom[QOSTAG_TO_LDOMID(dram_pkt->qosTag)] ++;
++        }
+         PARD_STATS_DRAMPKT(dram_pkt)->bytesWritten += burstSize;
+         #endif
+     }
+@@ -1309,10 +1392,17 @@
+ 
+     // deterimne if we have queued transactions targetting a
+     // bank in question
++    #if (ENABLE_PARD)
++    vector<uint64_t> waiting_mask(ranksPerChannel * banksPerRank, 0);
++    for (auto p = queue.begin(); p != queue.end(); ++p) {
++        waiting_mask[(*p)->bankId] |= 1<<(*p)->rowbuf;
++    }
++    #else
+     vector<bool> got_waiting(ranksPerChannel * banksPerRank, false);
+     for (auto p = queue.begin(); p != queue.end(); ++p) {
+         got_waiting[(*p)->bankId] = true;
+     }
++    #endif
+ 
+     for (int i = 0; i < ranksPerChannel; i++) {
+         for (int j = 0; j < banksPerRank; j++) {
+@@ -1320,13 +1410,32 @@
+ 
+             // if we have waiting requests for the bank, and it is
+             // amongst the first available, update the mask
++            #if (ENABLE_PARD)
++            if (waiting_mask[bank_id]) {
++            #else
+             if (got_waiting[bank_id]) {
++            #endif
+                 // simplistic approximation of when the bank can issue
+                 // an activate, ignoring any rank-to-rank switching
+                 // cost
++                #if (ENABLE_PARD)
++                bool have_close_page = false;
++                for (int rowbuf=0; rowbuf<Bank::ROW_BUFFER_COUNT; rowbuf++) {
++                    if ((1<<rowbuf & waiting_mask[bank_id]) &&
++                        (banks[i][j].openRow[rowbuf] == Bank::NO_ROW))
++                    {
++                        have_close_page = true;
++                        break;
++                    }
++                }
++                Tick act_at = have_close_page ?
++                    banks[i][j].actAllowedAt :
++                    std::max(banks[i][j].preAllowedAt, curTick()) + tRP;
++                #else
+                 Tick act_at = banks[i][j].openRow == Bank::NO_ROW ?
+                     banks[i][j].actAllowedAt :
+                     std::max(banks[i][j].preAllowedAt, curTick()) + tRP;
++                #endif
+ 
+                 if (act_at <= min_act_at) {
+                     // reset bank mask if new minimum is found
+@@ -1397,14 +1506,61 @@
+ 
+             for (int i = 0; i < ranksPerChannel; i++) {
+                 for (int j = 0; j < banksPerRank; j++) {
++                    #if (!ENABLE_PARD)
+                     if (banks[i][j].openRow != Bank::NO_ROW) {
+                         prechargeBank(banks[i][j], pre_at);
+-                    } else {
++                    }
++                    else {
+                         banks[i][j].actAllowedAt =
+                             std::max(banks[i][j].actAllowedAt, act_allowed_at);
+                         banks[i][j].preAllowedAt =
+                             std::max(banks[i][j].preAllowedAt, pre_at);
+                     }
++                    #else
++                    bool all_bank_precharged = true;
++                    // prechare each row buffer one-by-one
++                    for (int rowbuf=0; rowbuf<Bank::ROW_BUFFER_COUNT; rowbuf++) {
++                        if (banks[i][j].openRow[rowbuf] != Bank::NO_ROW) {
++                            // precharge bank when ready
++                            prechargeBank(banks[i][j], rowbuf,
++                                std::max(banks[i][j].preAllowedAt, pre_at));
++                            // next precharge must happend after prev precharge
++                            banks[i][j].preAllowedAt = banks[i][j].actAllowedAt;
++                            // mark not all banks were precharged
++                            all_bank_precharged = false;
++                        }
++                    }
++                    if (all_bank_precharged) {
++                        banks[i][j].actAllowedAt =
++                            std::max(banks[i][j].actAllowedAt, act_allowed_at);
++                        banks[i][j].preAllowedAt =
++                            std::max(banks[i][j].preAllowedAt, pre_at);
++                    }
++                    #endif
++                    /**
++                     * TODO: A more effective way, only close one row buffer for
++                     *       refresh, other open-row can serve row-hit requests.
++                     */
++                    /*
++                    #if (ENABLE_PARD)
++                    // CAUTION: last row buffer was used by refresh, so do not
++                    // allocate it to high-priority domains
++                    if (banks[i][j].openRow[Bank::ROW_BUFFER_COUNT-1] != Bank::NO_ROW)
++                    {
++                        prechargeBank(banks[i][j], Bank::ROW_BUFFER_COUNT-1, pre_at);
++                    }
++                    #else
++                    if (banks[i][j].openRow != Bank::NO_ROW) {
++                        prechargeBank(banks[i][j], pre_at);
++                    }
++                    #endif
++                    else {
++                        banks[i][j].actAllowedAt =
++                            std::max(banks[i][j].actAllowedAt, act_allowed_at);
++                        banks[i][j].preAllowedAt =
++                            std::max(banks[i][j].preAllowedAt, pre_at);
++                    }
++                    */
+                 }
+             }
+         } else {
+@@ -1536,7 +1692,7 @@
+     }
+ }
+ 
+-#ifdef ENABLE_PARD
++#if (ENABLE_PARD)
+ void
+ DRAMCtrl::updateStats(StatsTable::StatsType *_stats, void *args)
+ {
+@@ -1655,50 +1811,6 @@
+ 
+     avgMemAccLat = totMemAccLat / (readBursts - servicedByWrQ);
+ 
+-    #ifdef ENABLE_PARD
+-    readBurstsPerLDom
+-        .init(4)
+-        .name(name() + ".readBurstsPerLDom")
+-        .desc("Number of DRAM read bursts, "
+-              "including those serviced by the write queue")
+-        .flags(total);
+-    servicedByWrQPerLDom
+-        .init(4)
+-        .name(name() + ".servicedByWrQPerLDom")
+-        .desc("Number of DRAM read bursts serviced by the write queue")
+-        .flags(total);
+-    totMemAccLatPerLDom
+-        .init(4)
+-        .name(name() + ".totMemAccLatPerLDom")
+-        .desc("Total ticks spent from burst creation until serviced "
+-              "by the DRAM")
+-        .flags(total);
+-    totQLatPerLDom
+-        .init(4)
+-        .name(name() + ".totQLatPerLDom")
+-        .desc("Total ticks spent queuing");
+-    avgMemAccLatPerLDom
+-        .name(name() + ".avgMemAccLatPerLDom")
+-        .desc("Average memory access latency per DRAM burst")
+-        .precision(2);
+-    avgMemAccLatPerLDom = totMemAccLatPerLDom / (readBurstsPerLDom - servicedByWrQPerLDom);
+-    avgQLatPerLDom
+-        .name(name() + ".avgQLatPerLDom")
+-        .desc("Average queueing delay per DRAM burst")
+-        .precision(2);
+-    avgQLatPerLDom = totQLatPerLDom / (readBurstsPerLDom - servicedByWrQPerLDom);
+-
+-
+-    for (int i = 0; i < 4; i++) {
+-        readBurstsPerLDom.subname(i, csprintf("LDom#%d", i));
+-        servicedByWrQPerLDom.subname(i, csprintf("LDom#%d", i));
+-        totMemAccLatPerLDom.subname(i, csprintf("LDom#%d", i));
+-        totQLatPerLDom.subname(i, csprintf("LDom#%d", i));
+-        avgMemAccLatPerLDom.subname(i, csprintf("LDom#%d", i));
+-        avgQLatPerLDom.subname(i, csprintf("LDom#%d", i));
+-    }
+-    #endif
+-
+     numRdRetry
+         .name(name() + ".numRdRetry")
+         .desc("Number of times read queue was full causing retry");
+@@ -1872,6 +1984,90 @@
+     pwrStateTime.subname(2, "PRE_PDN");
+     pwrStateTime.subname(3, "ACT");
+     pwrStateTime.subname(4, "ACT_PDN");
++
++    #if (ENABLE_PARD)
++    // Basic request count stats
++    readBurstsPerLDom
++        .init(4)
++        .name(name() + ".readBurstsPerLDom")
++        .desc("Number of DRAM read bursts, "
++              "including those serviced by the write queue")
++        .flags(total);
++    writeBurstsPerLDom
++        .init(4)
++        .name(name() + ".writeBurstsPerLDom")
++        .desc("Number of DRAM write bursts, "
++              "including those merged in the write queue");
++    servicedByWrQPerLDom
++        .init(4)
++        .name(name() + ".servicedByWrQPerLDom")
++        .desc("Number of DRAM read bursts serviced by the write queue")
++        .flags(total);
++    mergedWrBurstsPerLDom
++        .init(4)
++        .name(name() + ".mergedWrBurstsPerLDom")
++        .desc("Number of DRAM write bursts merged with an existing one");
++
++    // Latency related
++    totMemAccLatPerLDom
++        .init(4)
++        .name(name() + ".totMemAccLatPerLDom")
++        .desc("Total ticks spent from burst creation until serviced "
++              "by the DRAM")
++        .flags(total);
++    totQLatPerLDom
++        .init(4)
++        .name(name() + ".totQLatPerLDom")
++        .desc("Total ticks spent queuing");
++    avgMemAccLatPerLDom
++        .name(name() + ".avgMemAccLatPerLDom")
++        .desc("Average memory access latency per DRAM burst")
++        .precision(2);
++    avgMemAccLatPerLDom = totMemAccLatPerLDom / (readBurstsPerLDom - servicedByWrQPerLDom);
++    avgQLatPerLDom
++        .name(name() + ".avgQLatPerLDom")
++        .desc("Average queueing delay per DRAM burst")
++        .precision(2);
++    avgQLatPerLDom = totQLatPerLDom / (readBurstsPerLDom - servicedByWrQPerLDom);
++
++    // RowBuffer Hit related
++    readRowHitsPerLDom
++        .init(4)
++        .name(name() + ".readRowHitsPerLDom")
++        .desc("Number of row buffer hits during reads");
++
++    writeRowHitsPerLDom
++        .init(4)
++        .name(name() + ".writeRowHitsPerLDom")
++        .desc("Number of row buffer hits during writes");
++
++    pageHitRatePerLDom
++        .name(name() + ".pageHitRatePerLDom")
++        .desc("Row buffer hit rate, read and write combined")
++        .precision(2);
++
++    pageHitRatePerLDom = (writeRowHitsPerLDom + readRowHitsPerLDom) /
++        (writeBurstsPerLDom - mergedWrBurstsPerLDom
++            + readBurstsPerLDom - servicedByWrQPerLDom) * 100;
++
++    // add subname for stats
++    for (int i = 0; i < 4; i++) {
++        readBurstsPerLDom.subname(i, csprintf("LDom#%d", i));
++        writeBurstsPerLDom.subname(i, csprintf("LDom#%d", i));
++        servicedByWrQPerLDom.subname(i, csprintf("LDom#%d", i));
++        mergedWrBurstsPerLDom.subname(i, csprintf("LDom#%d", i));
++
++        totMemAccLatPerLDom.subname(i, csprintf("LDom#%d", i));
++        totQLatPerLDom.subname(i, csprintf("LDom#%d", i));
++        avgMemAccLatPerLDom.subname(i, csprintf("LDom#%d", i));
++        avgQLatPerLDom.subname(i, csprintf("LDom#%d", i));
++
++        readRowHitsPerLDom.subname(i, csprintf("LDom#%d", i));
++        writeRowHitsPerLDom.subname(i, csprintf("LDom#%d", i));
++        pageHitRatePerLDom.subname(i, csprintf("LDom#%d", i));
++    }
++    #endif
++
+ }
+ 
+ void
+@@ -1925,7 +2121,7 @@
+       memory(_memory)
+ { }
+ 
+-#ifdef ENABLE_PARD
++#if (ENABLE_PARD)
+ void
+ DRAMCtrl::MemoryPort::schedTimingResp(PacketPtr pkt, Tick when)
+ {
+@@ -1967,7 +2163,7 @@
+ {
+     pkt->pushLabel(memory.name());
+ 
+-#ifndef ENABLE_PARD
++#if (!ENABLE_PARD)
+     if (!queue.checkFunctional(pkt)) {
+         // Default implementation of SimpleTimingPort::recvFunctional()
+         // calls recvAtomic() and throws away the latency; we can save a
+@@ -1990,7 +2186,7 @@
+ Tick
+ DRAMCtrl::MemoryPort::recvAtomic(PacketPtr pkt)
+ {
+-#ifndef ENABLE_PARD
++#if (!ENABLE_PARD)
+     return memory.recvAtomic(pkt);
+ #else
+     LDomID ldomID = QOSTAG_TO_LDOMID(pkt->getQosTag());
+@@ -2005,7 +2201,7 @@
+ bool
+ DRAMCtrl::MemoryPort::recvTimingReq(PacketPtr pkt)
+ {
+-#ifndef ENABLE_PARD
++#if (!ENABLE_PARD)
+     // pass it to the memory controller
+     return memory.recvTimingReq(pkt);
+ #else
+diff -r f6953126b70e -r 9e09f3646f8b src/mem/dram_ctrl.hh
+--- a/src/mem/dram_ctrl.hh	Tue Jul 15 10:29:16 2014 +0800
++++ b/src/mem/dram_ctrl.hh	Fri Jul 18 17:30:29 2014 +0800
+@@ -62,7 +62,7 @@
+ #include "params/DRAMCtrl.hh"
+ #include "sim/eventq.hh"
+ 
+-#ifdef ENABLE_PARD
++#if (ENABLE_PARD)
+ #include "hyper/base/ControlPlane.hh"
+ #include "hyper/base/ldom_addr.hh"
+ #endif
+@@ -91,7 +91,7 @@
+ 
+   private:
+ 
+-#ifdef ENABLE_PARD
++#if (ENABLE_PARD)
+     class DRAMCtrlSenderState : public Packet::SenderState
+     {
+       public:
+@@ -115,7 +115,7 @@
+ 
+         MemoryPort(const std::string& name, DRAMCtrl& _memory);
+ 
+-#ifdef ENABLE_PARD
++#if (ENABLE_PARD)
+         void schedTimingResp(PacketPtr pkt, Tick when);
+ #endif
+ 
+@@ -175,7 +175,14 @@
+ 
+         static const uint32_t NO_ROW = -1;
+ 
++      #if ENABLE_PARD
++        /** Memory controller in PARD have multiple row buffer */
++        static const int ROW_BUFFER_COUNT = 2;
++        uint32_t openRow[ROW_BUFFER_COUNT];
++        unsigned int numRowsActive;
++      #else
+         uint32_t openRow;
++      #endif
+ 
+         Tick colAllowedAt;
+         Tick preAllowedAt;
+@@ -185,9 +192,19 @@
+         uint32_t bytesAccessed;
+ 
+         Bank() :
+-            openRow(NO_ROW), colAllowedAt(0), preAllowedAt(0), actAllowedAt(0),
++            #if (ENABLE_PARD)
++            numRowsActive(0),
++            #else
++            openRow(NO_ROW),
++            #endif
++            colAllowedAt(0), preAllowedAt(0), actAllowedAt(0),
+             rowAccesses(0), bytesAccessed(0)
+-        { }
++        {
++            #if (ENABLE_PARD)
++            for (int i=0; i<ROW_BUFFER_COUNT; i++)
++                openRow[i] = NO_ROW;
++            #endif
++        }
+     };
+ 
+     /**
+@@ -230,11 +247,6 @@
+ 
+         const bool isRead;
+ 
+-        #ifdef ENABLE_PARD
+-        /** QosTag copied from packet */
+-        const uint64_t qosTag;
+-        #endif
+-
+         /** Will be populated by address decoder */
+         const uint8_t rank;
+         const uint8_t bank;
+@@ -268,15 +280,33 @@
+         BurstHelper* burstHelper;
+         Bank& bankRef;
+ 
++        #if (ENABLE_PARD)
++        /** QosTag copied from packet */
++        const uint64_t qosTag;
++        const int rowbuf;
++        #endif
++
++        #if (ENABLE_PARD)
++        DRAMPacket(PacketPtr _pkt, bool is_read, uint8_t _rank, uint8_t _bank,
++                   uint16_t _row, uint16_t bank_id, Addr _addr,
++                   unsigned int _size, Bank& bank_ref, int _rowbuf)
++            : entryTime(curTick()), readyTime(curTick()),
++              pkt(_pkt), isRead(is_read),
++              rank(_rank), bank(_bank), row(_row),
++              bankId(bank_id), addr(_addr), size(_size), burstHelper(NULL),
++              bankRef(bank_ref), qosTag(_pkt->getQosTag()), rowbuf(_rowbuf)
++        { }
++        #else
+         DRAMPacket(PacketPtr _pkt, bool is_read, uint8_t _rank, uint8_t _bank,
+                    uint16_t _row, uint16_t bank_id, Addr _addr,
+                    unsigned int _size, Bank& bank_ref)
+             : entryTime(curTick()), readyTime(curTick()),
+-              pkt(_pkt), isRead(is_read), qosTag(_pkt->getQosTag()),
++              pkt(_pkt), isRead(is_read),
+               rank(_rank), bank(_bank), row(_row),
+               bankId(bank_id), addr(_addr), size(_size), burstHelper(NULL),
+               bankRef(bank_ref)
+         { }
++        #endif
+ 
+     };
+ 
+@@ -421,8 +451,13 @@
+      * @param row Index of the row
+      * @param bank_ref Reference to the bank
+      */
++    #if (!ENABLE_PARD)
+     void activateBank(Tick act_tick, uint8_t rank, uint8_t bank,
+                       uint16_t row, Bank& bank_ref);
++    #else
++    void activateBank(Tick act_tick, uint8_t rank, uint8_t bank,
++                      uint16_t row, int rowbuf, Bank& bank_ref);
++    #endif
+ 
+     /**
+      * Precharge a given bank and also update when the precharge is
+@@ -432,19 +467,24 @@
+      * @param bank The bank to precharge
+      * @param pre_at Time when the precharge takes place
+      */
++    #if (!ENABLE_PARD)
+     void prechargeBank(Bank& bank, Tick pre_at);
++    #else
++    void prechargeBank(Bank& bank, int rowbuf, Tick pre_at);
++    #endif
+ 
+     /**
+      * Used for debugging to observe the contents of the queues.
+      */
+     void printQs() const;
+ 
+-#ifdef ENABLE_PARD
++#if (ENABLE_PARD)
+   protected:
+ 
+     struct DispatchTableEntry {
+         int priority;
+         int effective_priority;
++        int rowbuf_mask;   // select row buffer from bank
+     };
+     typedef std::vector<DispatchTableEntry> DispatchTable;
+     #define MAX_PRIORITY 64
+@@ -740,16 +780,6 @@
+     Stats::Formula avgBusLat;
+     Stats::Formula avgMemAccLat;
+ 
+-    #ifdef ENABLE_PARD
+-    // Latencies per Logical domain
+-    Stats::Vector readBurstsPerLDom;
+-    Stats::Vector servicedByWrQPerLDom;
+-    Stats::Vector totMemAccLatPerLDom;
+-    Stats::Vector totQLatPerLDom;
+-    Stats::Formula avgMemAccLatPerLDom;
+-    Stats::Formula avgQLatPerLDom;
+-    #endif
+-
+     // Average bandwidth
+     Stats::Formula avgRdBW;
+     Stats::Formula avgWrBW;
+@@ -775,6 +805,24 @@
+     Stats::Formula pageHitRate;
+     Stats::Vector pwrStateTime;
+ 
++    #if (ENABLE_PARD)
++    // Latencies per Logical domain
++    Stats::Vector readBurstsPerLDom;
++    Stats::Vector writeBurstsPerLDom;
++    Stats::Vector servicedByWrQPerLDom;
++    Stats::Vector mergedWrBurstsPerLDom;
++
++    Stats::Vector totMemAccLatPerLDom;
++    Stats::Vector totQLatPerLDom;
++    Stats::Formula avgMemAccLatPerLDom;
++    Stats::Formula avgQLatPerLDom;
++
++    Stats::Vector readRowHitsPerLDom;
++    Stats::Vector writeRowHitsPerLDom;
++    Stats::Formula pageHitRatePerLDom;
++    #endif
++
++
+     // Track when we transitioned to the current power state
+     Tick pwrStateTick;
+ 
+# HG changeset patch
+# User Jiuyue Ma <majiuyue@ncic.ac.cn>
+# Date 1406509434 -28800
+# Node ID b3a647c00e2a6251ee067389740d09f76419a4b0
+# Parent  9e09f3646f8bd72c24f700d1237432886da3eb15
+mem: remove address mapping in DRAMCtrl, move it to membus.mapper
+
+diff -r 9e09f3646f8b -r b3a647c00e2a src/mem/dram_ctrl.cc
+--- a/src/mem/dram_ctrl.cc	Fri Jul 18 17:30:29 2014 +0800
++++ b/src/mem/dram_ctrl.cc	Mon Jul 28 09:03:54 2014 +0800
+@@ -62,7 +62,7 @@
+     nextReqEvent(this), respondEvent(this), activateEvent(this),
+     prechargeEvent(this), refreshEvent(this), powerEvent(this),
+ #if (ENABLE_PARD)
+-    tlb(), dispatchs(32),
++    params(32),
+     stats(sizeof(struct DRAMCtrlStats)/sizeof(uint64_t), 32),
+     triggers(stats, 32),
+ #endif
+@@ -307,12 +307,12 @@
+             dramPktAddr, rank, bank, row);
+ 
+     #if (ENABLE_PARD)
+-    // select a row buffer according to qos tag and dispatch table
++    // select a row buffer according to qos tag and param table
+     LDomID ldomID = QOSTAG_TO_LDOMID(pkt->getQosTag());
+-    assert(ldomID < dispatchs.size());
++    assert(ldomID < params.size());
+     int rowbuf;
+     for (rowbuf=0; rowbuf<Bank::ROW_BUFFER_COUNT; rowbuf++)
+-        if (1<<rowbuf & dispatchs[ldomID].rowbuf_mask)
++        if (1<<rowbuf & params[ldomID].rowbuf_mask)
+             break;
+     assert(rowbuf < Bank::ROW_BUFFER_COUNT);
+     #endif
+@@ -629,6 +629,7 @@
+             #if (ENABLE_PARD)
+             PARD_STATS(pkt)->readReqs++;
+             PARD_STATS(pkt)->bytesReadSys += size;
++            bytesReadSysPerLDom[QOSTAG_TO_LDOMID(pkt->getQosTag())] += size;
+             #endif
+         }
+     } else if (pkt->isWrite()) {
+@@ -649,6 +650,7 @@
+             #if (ENABLE_PARD)
+             PARD_STATS(pkt)->writeReqs++;
+             PARD_STATS(pkt)->bytesWrittenSys += size;
++            bytesWrittenSysPerLDom[QOSTAG_TO_LDOMID(pkt->getQosTag())] += size;
+             #endif
+         }
+     } else {
+@@ -757,10 +759,10 @@
+ 
+         #if (ENABLE_PARD)
+         // check priority, always select higher effective priority
+-        if (dispatchs[QOSTAG_TO_LDOMID(dram_pkt->qosTag)].effective_priority
++        if (params[QOSTAG_TO_LDOMID(dram_pkt->qosTag)].effective_priority
+               > priority)
+             continue;
+-        priority = dispatchs[QOSTAG_TO_LDOMID(dram_pkt->qosTag)].effective_priority;
++        priority = params[QOSTAG_TO_LDOMID(dram_pkt->qosTag)].effective_priority;
+         #endif
+ 
+         // Check if it is a row hit
+@@ -2008,6 +2010,16 @@
+         .name(name() + ".mergedWrBurstsPerLDom")
+         .desc("Number of DRAM write bursts merged with an existing one");
+ 
++    bytesReadSysPerLDom
++        .init(4)
++        .name(name() + ".bytesReadSysPerLDom")
++        .desc("Total read bytes from the system interface side");
++
++    bytesWrittenSysPerLDom
++        .init(4)
++        .name(name() + ".bytesWrittenSysPerLDom")
++        .desc("Total written bytes from the system interface side");
++
+     // Latency related
+     totMemAccLatPerLDom
+         .init(4)
+@@ -2050,12 +2062,29 @@
+         (writeBurstsPerLDom - mergedWrBurstsPerLDom
+             + readBurstsPerLDom - servicedByWrQPerLDom) * 100;
+ 
++
++    avgRdBWSysPerLDom
++        .name(name() + ".avgRdBWSysPerLDom")
++        .desc("Average system read bandwidth in MiByte/s")
++        .precision(2);
++
++    avgRdBWSysPerLDom = (bytesReadSysPerLDom / 1000000) / simSeconds;
++
++    avgWrBWSysPerLDom
++        .name(name() + ".avgWrBWSysPerLDom")
++        .desc("Average system write bandwidth in MiByte/s")
++        .precision(2);
++
++    avgWrBWSysPerLDom = (bytesWrittenSysPerLDom / 1000000) / simSeconds;
++
+     // add subname for stats
+     for (int i = 0; i < 4; i++) {
+         readBurstsPerLDom.subname(i, csprintf("LDom#%d", i));
+         writeBurstsPerLDom.subname(i, csprintf("LDom#%d", i));
+         servicedByWrQPerLDom.subname(i, csprintf("LDom#%d", i));
+         mergedWrBurstsPerLDom.subname(i, csprintf("LDom#%d", i));
++        bytesReadSysPerLDom.subname(i, csprintf("LDom#%d", i));
++        bytesWrittenSysPerLDom.subname(i, csprintf("LDom#%d", i));
+ 
+         totMemAccLatPerLDom.subname(i, csprintf("LDom#%d", i));
+         totQLatPerLDom.subname(i, csprintf("LDom#%d", i));
+@@ -2065,6 +2094,9 @@
+         readRowHitsPerLDom.subname(i, csprintf("LDom#%d", i));
+         writeRowHitsPerLDom.subname(i, csprintf("LDom#%d", i));
+         pageHitRatePerLDom.subname(i, csprintf("LDom#%d", i));
++
++        avgRdBWSysPerLDom.subname(i, csprintf("LDom#%d", i));
++        avgWrBWSysPerLDom.subname(i, csprintf("LDom#%d", i));
+     }
+     #endif
+ 
+@@ -2121,35 +2153,6 @@
+       memory(_memory)
+ { }
+ 
+-#if (ENABLE_PARD)
+-void
+-DRAMCtrl::MemoryPort::schedTimingResp(PacketPtr pkt, Tick when)
+-{
+-    DRAMCtrlSenderState *receivedState =
+-        dynamic_cast<DRAMCtrlSenderState *>(pkt->senderState);
+-
+-    // Restore initial sender state
+-    panic_if(receivedState == NULL,
+-             "DRAMCtrl %s got a response without send state\n",
+-             name());
+-
+-    pkt->senderState = receivedState->predecessor;
+-    pkt->setAddr(receivedState->origAddr);
+-    delete receivedState;
+-
+-    // After finish processing a request, check if any triggers satisfied
+-    // ATTETION:
+-    //     Only timing mode support trigger mechanism.
+-    LDomID ldomID = QOSTAG_TO_LDOMID(pkt->getQosTag());
+-    const TriggerTable::TriggeredList &tlist = memory.triggers.checkTrigger(ldomID);
+-    for (int x=0; x<tlist.size(); x++)
+-        DPRINTFN("Trigger <%d,%d>\n", tlist[x].first, tlist[x].second);
+-
+-    // Schedule response
+-    queue.schedSendTiming(pkt, when);
+-}
+-#endif
+-
+ AddrRangeList
+ DRAMCtrl::MemoryPort::getAddrRanges() const
+ {
+@@ -2162,71 +2165,26 @@
+ DRAMCtrl::MemoryPort::recvFunctional(PacketPtr pkt)
+ {
+     pkt->pushLabel(memory.name());
+-
+-#if (!ENABLE_PARD)
+     if (!queue.checkFunctional(pkt)) {
+         // Default implementation of SimpleTimingPort::recvFunctional()
+         // calls recvAtomic() and throws away the latency; we can save a
+         // little here by just not calculating the latency.
+         memory.recvFunctional(pkt);
+     }
+-#else
+-    LDomID ldomID = QOSTAG_TO_LDOMID(pkt->getQosTag());
+-    Addr orig_addr = pkt->getAddr();
+-    pkt->setAddr(memory.tlb.remapAddr(ldomID, orig_addr));
+-    if (!queue.checkFunctional(pkt)) {
+-        memory.recvFunctional(pkt);
+-    }
+-    pkt->setAddr(orig_addr);
+-#endif
+-
+     pkt->popLabel();
+ }
+ 
+ Tick
+ DRAMCtrl::MemoryPort::recvAtomic(PacketPtr pkt)
+ {
+-#if (!ENABLE_PARD)
+     return memory.recvAtomic(pkt);
+-#else
+-    LDomID ldomID = QOSTAG_TO_LDOMID(pkt->getQosTag());
+-    Addr orig_addr = pkt->getAddr();
+-    pkt->setAddr(memory.tlb.remapAddr(ldomID, orig_addr));
+-    Tick ret_tick = memory.recvAtomic(pkt);
+-    pkt->setAddr(orig_addr);
+-    return ret_tick;
+-#endif
+ }
+ 
+ bool
+ DRAMCtrl::MemoryPort::recvTimingReq(PacketPtr pkt)
+ {
+-#if (!ENABLE_PARD)
+     // pass it to the memory controller
+     return memory.recvTimingReq(pkt);
+-#else
+-    LDomID ldomID = QOSTAG_TO_LDOMID(pkt->getQosTag());
+-    Addr orig_addr = pkt->getAddr();
+-    bool needsResponse = pkt->needsResponse();
+-    bool memInhibitAsserted = pkt->memInhibitAsserted();
+-
+-    if (needsResponse && !memInhibitAsserted) {
+-        pkt->pushSenderState(new DRAMCtrlSenderState(orig_addr));
+-    }
+-
+-    pkt->setAddr(memory.tlb.remapAddr(ldomID, orig_addr));
+-
+-    // Attempt to send the packet (always succeeds for inhibited
+-    // packets)
+-    bool successful = memory.recvTimingReq(pkt);
+-
+-    // If not successful, restore the sender state
+-    if (!successful && needsResponse) {
+-        delete pkt->popSenderState();
+-    }
+-
+-    return successful;
+-#endif
+ }
+ 
+ DRAMCtrl*
+diff -r 9e09f3646f8b -r b3a647c00e2a src/mem/dram_ctrl.hh
+--- a/src/mem/dram_ctrl.hh	Fri Jul 18 17:30:29 2014 +0800
++++ b/src/mem/dram_ctrl.hh	Mon Jul 28 09:03:54 2014 +0800
+@@ -115,10 +115,6 @@
+ 
+         MemoryPort(const std::string& name, DRAMCtrl& _memory);
+ 
+-#if (ENABLE_PARD)
+-        void schedTimingResp(PacketPtr pkt, Tick when);
+-#endif
+-
+       protected:
+ 
+         Tick recvAtomic(PacketPtr pkt);
+@@ -481,22 +477,20 @@
+ #if (ENABLE_PARD)
+   protected:
+ 
+-    struct DispatchTableEntry {
+-        int priority;
+-        int effective_priority;
+-        int rowbuf_mask;   // select row buffer from bank
++    struct ParamTableEntry {
++        uint64_t priority;
++        uint64_t effective_priority;
++        uint64_t rowbuf_mask;   // select row buffer from bank
+     };
+-    typedef std::vector<DispatchTableEntry> DispatchTable;
++    typedef std::vector<ParamTableEntry> ParamTable;
+     #define MAX_PRIORITY 64
+ 
+     /**
+      * PARD Configuration Table
+-     * 1. Logical domain address translator  **critical path**
+-     * 2. Dispatch table                     **critical path**
+-     * 3. Stats table & Trigger table
++     * 1. Parameter table                    **critical path**
++     * 2. Stats table & Trigger table
+      */
+-    LDomAddrTLB tlb;
+-    DispatchTable dispatchs;
++    ParamTable params;
+     StatsTable stats;
+     TriggerTable triggers;
+ 
+@@ -811,6 +805,8 @@
+     Stats::Vector writeBurstsPerLDom;
+     Stats::Vector servicedByWrQPerLDom;
+     Stats::Vector mergedWrBurstsPerLDom;
++    Stats::Vector bytesReadSysPerLDom;
++    Stats::Vector bytesWrittenSysPerLDom;
+ 
+     Stats::Vector totMemAccLatPerLDom;
+     Stats::Vector totQLatPerLDom;
+@@ -820,6 +816,9 @@
+     Stats::Vector readRowHitsPerLDom;
+     Stats::Vector writeRowHitsPerLDom;
+     Stats::Formula pageHitRatePerLDom;
++
++    Stats::Formula avgRdBWSysPerLDom;
++    Stats::Formula avgWrBWSysPerLDom;
+     #endif
+ 
+ 

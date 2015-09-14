@@ -1,0 +1,96 @@
+diff --git a/linux-2.6.22/drivers/serial/serial_core.c b/linux-2.6.22/drivers/serial/serial_core.c
+index 326020f..839d41c 100644
+--- a/linux-2.6.22/drivers/serial/serial_core.c
++++ b/linux-2.6.22/drivers/serial/serial_core.c
+@@ -104,9 +104,9 @@ static void uart_start(struct tty_struct *tty)
+ 	struct uart_port *port = state->port;
+ 	unsigned long flags;
+ 
+-	spin_lock_irqsave(&port->lock, flags);
++	spin_lock_irqsave(&port->info->lock, flags);
+ 	__uart_start(tty);
+-	spin_unlock_irqrestore(&port->lock, flags);
++	spin_unlock_irqrestore(&port->info->lock, flags);
+ }
+ 
+ static void uart_tasklet_action(unsigned long data)
+@@ -453,12 +453,12 @@ __uart_put_char(struct uart_port *port, struct circ_buf *circ, unsigned char c)
+ 	if (!circ->buf)
+ 		return;
+ 
+-	spin_lock_irqsave(&port->lock, flags);
++	spin_lock_irqsave(&port->info->lock, flags);
+ 	if (uart_circ_chars_free(circ) != 0) {
+ 		circ->buf[circ->head] = c;
+ 		circ->head = (circ->head + 1) & (UART_XMIT_SIZE - 1);
+ 	}
+-	spin_unlock_irqrestore(&port->lock, flags);
++	spin_unlock_irqrestore(&port->info->lock, flags);
+ }
+ 
+ static void uart_put_char(struct tty_struct *tty, unsigned char ch)
+@@ -497,7 +497,7 @@ uart_write(struct tty_struct *tty, const unsigned char *buf, int count)
+ 	if (!circ->buf)
+ 		return 0;
+ 
+-	spin_lock_irqsave(&port->lock, flags);
++	spin_lock_irqsave(&port->info->lock, flags);
+ 	while (1) {
+ 		c = CIRC_SPACE_TO_END(circ->head, circ->tail, UART_XMIT_SIZE);
+ 		if (count < c)
+@@ -510,7 +510,7 @@ uart_write(struct tty_struct *tty, const unsigned char *buf, int count)
+ 		count -= c;
+ 		ret += c;
+ 	}
+-	spin_unlock_irqrestore(&port->lock, flags);
++	spin_unlock_irqrestore(&port->info->lock, flags);
+ 
+ 	uart_start(tty);
+ 	return ret;
+@@ -547,9 +547,9 @@ static void uart_flush_buffer(struct tty_struct *tty)
+ 
+ 	pr_debug("uart_flush_buffer(%d) called\n", tty->index);
+ 
+-	spin_lock_irqsave(&port->lock, flags);
++	spin_lock_irqsave(&port->info->lock, flags);
+ 	uart_circ_clear(&state->info->xmit);
+-	spin_unlock_irqrestore(&port->lock, flags);
++	spin_unlock_irqrestore(&port->info->lock, flags);
+ 	tty_wakeup(tty);
+ }
+ 
+@@ -568,9 +568,9 @@ static void uart_send_xchar(struct tty_struct *tty, char ch)
+ 	else {
+ 		port->x_char = ch;
+ 		if (ch) {
+-			spin_lock_irqsave(&port->lock, flags);
++			spin_lock_irqsave(&port->info->lock, flags);
+ 			port->ops->start_tx(port);
+-			spin_unlock_irqrestore(&port->lock, flags);
++			spin_unlock_irqrestore(&port->info->lock, flags);
+ 		}
+ 	}
+ }
+@@ -1525,6 +1525,10 @@ static struct uart_state *uart_get(struct uart_driver *drv, int line)
+ 			init_waitqueue_head(&state->info->open_wait);
+ 			init_waitqueue_head(&state->info->delta_msr_wait);
+ 
++			/* majiuyue: seperate port->lock and info->lock */
++ 			spin_lock_init(&state->info->lock);
++			lockdep_set_class(&state->info->lock, &port_lock_key);
++
+ 			/*
+ 			 * Link the info into the other structures.
+ 			 */
+diff --git a/linux-2.6.22/include/linux/serial_core.h b/linux-2.6.22/include/linux/serial_core.h
+index 7f2c99d..55ded23 100644
+--- a/linux-2.6.22/include/linux/serial_core.h
++++ b/linux-2.6.22/include/linux/serial_core.h
+@@ -322,6 +322,7 @@ typedef unsigned int __bitwise__ uif_t;
+  * stuff here.
+  */
+ struct uart_info {
++	spinlock_t		lock;		/* majiuyue: uart info lock */
+ 	struct tty_struct	*tty;
+ 	struct circ_buf		xmit;
+ 	uif_t			flags;

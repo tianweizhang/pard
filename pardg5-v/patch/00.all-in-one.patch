@@ -1,0 +1,1795 @@
+exporting patches:
+# HG changeset patch
+# User Jiuyue Ma <majiuyue@ncic.ac.cn>
+# Date 1398396282 -28800
+# Node ID 3458d2b8216dc39d8e6a1e4cad5f28e3f2b7c626
+# Parent  13b5ba4be2f062084b0ee72e822003ce58b9b8b6
+apply PARDg5-V all-in-one patch
+
+diff -r 13b5ba4be2f0 -r 3458d2b8216d src/base/SConscript
+diff -r 936a3a8006f6 src/arch/x86/SConscript
+--- a/src/arch/x86/SConscript	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/arch/x86/SConscript	Wed Apr 09 15:04:53 2014 +0800
+@@ -86,6 +86,9 @@
+     DebugFlag('Decoder', "Decoder debug output")
+     DebugFlag('X86', "Generic X86 ISA debugging")
+ 
++    DebugFlag('X86Predecoder', "X86 predecoder debug output")
++    Source('predecoder.cc')
++
+     python_files = (
+         '__init__.py',
+         'general_purpose/__init__.py',
+diff -r 936a3a8006f6 src/arch/x86/cpuid.cc
+--- a/src/arch/x86/cpuid.cc	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/arch/x86/cpuid.cc	Wed Apr 09 15:04:53 2014 +0800
+@@ -48,12 +48,12 @@
+         L1CacheAndTLB,
+         L2L3CacheAndL2TLB,
+         APMInfo,
++        LongModeAddressSize,
+  
+         /*
+          * The following are defined by the spec but not yet implemented
+          */
+-/*      LongModeAddressSize,
+-        // Function 9 is reserved
++/*      // Function 9 is reserved
+         SVMInfo = 10,
+         // Functions 11-24 are reserved
+         TLB1GBPageInfo = 25,
+@@ -130,8 +130,11 @@
+                 result = CpuidResult(0x80000018, 0x68747541,
+                                      0x69746e65, 0x444d4163);
+                 break;
+-/*            case LongModeAddressSize:
+-              case SVMInfo:
++              case LongModeAddressSize:
++                result = CpuidResult(0x0000ffff, 0x00000000,
++                                     0x00000000, 0x00000000);
++                break;
++/*            case SVMInfo:
+               case TLB1GBPageInfo:
+               case PerformanceInfo:*/
+               default:
+diff -r 936a3a8006f6 src/arch/x86/decoder.hh
+--- a/src/arch/x86/decoder.hh	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/arch/x86/decoder.hh	Wed Apr 09 15:04:53 2014 +0800
+@@ -49,6 +49,7 @@
+ 
+ class Decoder
+ {
++    friend class X86Predecoder;
+   private:
+     //These are defined and documented in decoder_tables.cc
+     static const uint8_t Prefixes[256];
+diff -r 936a3a8006f6 src/arch/x86/isa/decoder/two_byte_opcodes.isa
+--- a/src/arch/x86/isa/decoder/two_byte_opcodes.isa	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/arch/x86/isa/decoder/two_byte_opcodes.isa	Wed Apr 09 15:04:53 2014 +0800
+@@ -348,6 +348,8 @@
+                         0x1: MOV(Rd,Dd);
+                         0x2: MOV(Cd,Rd);
+                         0x3: MOV(Dd,Rd);
++                        0x4: MOV(Rd, QRd);
++                        0x6: MOV(QRd, Rd);
+                         default: UD2();
+                     }
+                     default: UD2();
+diff -r 936a3a8006f6 src/arch/x86/isa/insts/general_purpose/data_transfer/move.py
+--- a/src/arch/x86/isa/insts/general_purpose/data_transfer/move.py	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/arch/x86/isa/insts/general_purpose/data_transfer/move.py	Wed Apr 09 15:04:53 2014 +0800
+@@ -196,6 +196,18 @@
+     rddr reg, regm
+ };
+ 
++def macroop MOV_R_QR {
++    .serializing
++    .adjust_env maxOsz
++    rdqr reg, regm
++};
++
++def macroop MOV_QR_R {
++    .serializing
++    .adjust_env maxOsz
++    wrqr reg, regm
++};
++
+ def macroop MOV_R_S {
+     rdsel reg, regm
+ };
+diff -r 936a3a8006f6 src/arch/x86/isa/microops/regop.isa
+--- a/src/arch/x86/isa/microops/regop.isa	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/arch/x86/isa/microops/regop.isa	Wed Apr 09 15:04:53 2014 +0800
+@@ -1693,4 +1693,34 @@
+         code = '''
+             DestReg = X86ISA::convX87TagsToXTags(FTW);
+         '''
++
++    class Rdqr(RegOp):
++        def __init__(self, dest, src1, flags=None, dataSize="env.dataSize"):
++            super(Rdqr, self).__init__(dest, \
++                    src1, "InstRegIndex(NUM_INTREGS)", flags, dataSize)
++        rdqrCode = '''
++            if (src1 >1) {
++                fault = new InvalidOpcode();
++            } else {
++                %s
++            }
++        '''
++        code = rdqrCode % "DestReg = merge(DestReg, QoSSrc1, dataSize);"
++        big_code = rdqrCode % "DestReg = QoSSrc1 & mask(dataSize * 8);"
++
++    class Wrqr(RegOp):
++        def __init__(self, dest, src1, flags=None, dataSize="env.dataSize"):
++            super(Wrqr, self).__init__(dest, \
++                    src1, "InstRegIndex(NUM_INTREGS)", flags, dataSize)
++        code = '''
++            if (dest > 1) {
++                fault = new InvalidOpcode();
++            } else {
++                HandyM5Reg m5reg = M5Reg;
++                // QoS only worked in protected-mode with CPL==0
++                //if (!m5reg.prot || m5reg.cpl>0)
++                //    fault = new GeneralProtection(0);
++                QoSDest = psrc1;
++            }
++        '''
+ }};
+diff -r 936a3a8006f6 src/arch/x86/isa/operands.isa
+--- a/src/arch/x86/isa/operands.isa	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/arch/x86/isa/operands.isa	Wed Apr 09 15:04:53 2014 +0800
+@@ -187,6 +187,9 @@
+         'SegAttrDest':   squashCSReg('MISCREG_SEG_ATTR(dest)', 110),
+         'SegAttrSrc1':   controlReg('MISCREG_SEG_ATTR(src1)', 111),
+ 
++        'QoSDest':       controlReg('MISCREG_QR(dest)', 112),
++        'QoSSrc1':       controlReg('MISCREG_QR(src1)', 113),
++
+         # Operands to access specific control registers directly.
+         'EferOp':        squashCReg('MISCREG_EFER', 200),
+         'CR4Op':         controlReg('MISCREG_CR4', 201),
+@@ -202,6 +205,7 @@
+         'MiscRegSrc1':   controlReg('src1', 211),
+         'TscOp':         controlReg('MISCREG_TSC', 212),
+         'M5Reg':         squashCReg('MISCREG_M5_REG', 213),
++        'QR0Op':         controlReg('MISCREG_QR0', 214),
+         'Mem':           ('Mem', 'uqw', None, \
+                           ('IsMemRef', 'IsLoad', 'IsStore'), 300)
+ }};
+diff -r 936a3a8006f6 src/arch/x86/isa/specialize.isa
+--- a/src/arch/x86/isa/specialize.isa	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/arch/x86/isa/specialize.isa	Wed Apr 09 15:04:53 2014 +0800
+@@ -172,6 +172,12 @@
+                 env.addToDisassembly(
+                         "ccprintf(out, \"DR%%d\", %s);\n" % ModRMRegIndex)
+                 Name += "_D"
++            elif opType.tag == "QR":
++                # A QoS register indexed by the "reg" field
++                env.addReg(ModRMRegIndex);
++                env.addToDisassembly(
++                        "ccprintf(out, \"QR%%d\", %s);\n" % ModRMRegIndex)
++                Name += "_QR"
+             elif opType.tag == "S":
+                 # A segment selector register indexed by the "reg" field
+                 env.addReg(ModRMRegIndex)
+diff -r 936a3a8006f6 src/arch/x86/linux/syscalls.cc
+--- a/src/arch/x86/linux/syscalls.cc	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/arch/x86/linux/syscalls.cc	Wed Apr 09 15:04:53 2014 +0800
+@@ -230,8 +230,8 @@
+     /*  14 */ SyscallDesc("rt_sigprocmask", ignoreFunc),
+     /*  15 */ SyscallDesc("rt_sigreturn", unimplementedFunc),
+     /*  16 */ SyscallDesc("ioctl", ioctlFunc<X86Linux64>),
+-    /*  17 */ SyscallDesc("pread64", unimplementedFunc),
+-    /*  18 */ SyscallDesc("pwrite64", unimplementedFunc),
++    /*  17 */ SyscallDesc("pread64", pread64Func),
++    /*  18 */ SyscallDesc("pwrite64", pwrite64Func),
+     /*  19 */ SyscallDesc("readv", unimplementedFunc),
+     /*  20 */ SyscallDesc("writev", writevFunc<X86Linux64>),
+     /*  21 */ SyscallDesc("access", ignoreFunc),
+@@ -672,8 +672,8 @@
+     /* 177 */ SyscallDesc("rt_sigtimedwait", unimplementedFunc),
+     /* 178 */ SyscallDesc("rt_sigqueueinfo", unimplementedFunc),
+     /* 179 */ SyscallDesc("rt_sigsuspend", unimplementedFunc),
+-    /* 180 */ SyscallDesc("pread64", unimplementedFunc),
+-    /* 181 */ SyscallDesc("pwrite64", unimplementedFunc),
++    /* 180 */ SyscallDesc("pread64", pread64Func),
++    /* 181 */ SyscallDesc("pwrite64", pwrite64Func),
+     /* 182 */ SyscallDesc("chown", unimplementedFunc),
+     /* 183 */ SyscallDesc("getcwd", getcwdFunc),
+     /* 184 */ SyscallDesc("capget", unimplementedFunc),
+diff -r 936a3a8006f6 src/arch/x86/pagetable_walker.cc
+--- a/src/arch/x86/pagetable_walker.cc	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/arch/x86/pagetable_walker.cc	Wed Apr 09 15:04:53 2014 +0800
+@@ -243,14 +243,17 @@
+         sendPackets();
+     } else {
+         do {
++            read->setQosTag(tc->readMiscRegNoEffect(TheISA::MISCREG_QR0)|0xe000000000000000);
+             walker->port.sendAtomic(read);
+             PacketPtr write = NULL;
+             fault = stepWalk(write);
+             assert(fault == NoFault || read == NULL);
+             state = nextState;
+             nextState = Ready;
+-            if (write)
++            if (write) {
++                write->setQosTag(tc->readMiscRegNoEffect(TheISA::MISCREG_QR0)|0xe000000000000000);
+                 walker->port.sendAtomic(write);
++            }
+         } while(read);
+         state = Ready;
+         nextState = Waiting;
+@@ -667,6 +670,7 @@
+         PacketPtr pkt = read;
+         read = NULL;
+         inflight++;
++        pkt->setQosTag(tc->readMiscRegNoEffect(TheISA::MISCREG_QR0)|0xe000000000000000);
+         if (!walker->sendTiming(this, pkt)) {
+             retrying = true;
+             read = pkt;
+@@ -679,6 +683,7 @@
+         PacketPtr write = writes.back();
+         writes.pop_back();
+         inflight++;
++        write->setQosTag(tc->readMiscRegNoEffect(TheISA::MISCREG_QR0)|0xe000000000000000);
+         if (!walker->sendTiming(this, write)) {
+             retrying = true;
+             writes.push_back(write);
+diff -r 936a3a8006f6 src/arch/x86/predecoder.cc
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/src/arch/x86/predecoder.cc	Wed Apr 09 15:04:53 2014 +0800
+@@ -0,0 +1,379 @@
++#include "arch/x86/predecoder.hh"
++#include "arch/x86/regs/misc.hh"
++#include "base/misc.hh"
++#include "base/trace.hh"
++#include "base/types.hh"
++#include "debug/X86Predecoder.hh"
++
++namespace X86ISA
++{
++
++const uint8_t * X86Predecoder::Prefixes = Decoder::Prefixes;
++const uint8_t (* X86Predecoder::UsesModRM)[256] = Decoder::UsesModRM;
++const uint8_t (* X86Predecoder::ImmediateType)[256] = Decoder::ImmediateType;
++const uint8_t (* X86Predecoder::SizeTypeToSize)[10] = Decoder::SizeTypeToSize;
++
++X86Predecoder::State
++X86Predecoder::doResetState()
++{
++    emi.rex = 0;
++    emi.legacy = 0;
++    emi.opcode.num = 0;
++    emi.opcode.op = 0;
++    emi.opcode.prefixA = emi.opcode.prefixB = 0;
++
++    immediateCollected = 0;
++    emi.immediate = 0;
++    emi.displacement = 0;
++    emi.dispSize = 0;
++
++    emi.modRM = 0;
++    emi.sib = 0;
++
++    return Decoder::PrefixState;
++}
++
++void
++X86Predecoder::process()
++{
++    state = doResetState();
++
++    while (!instDone) {
++        uint8_t nextByte = getNextByte();
++        switch (state) {
++          case Decoder::PrefixState:
++            state = doPrefixState(nextByte);
++            break;
++          case Decoder::OpcodeState:
++            state = doOpcodeState(nextByte);
++            break;
++          case Decoder::ModRMState:
++            state = doModRMState(nextByte);
++            break;
++          case Decoder::SIBState:
++            state = doSIBState(nextByte);
++            break;
++          case Decoder::DisplacementState:
++            state = doDisplacementState();
++            break;
++          case Decoder::ImmediateState:
++            state = doImmediateState();
++            break;
++          case Decoder::ErrorState:
++            panic("Went to the error state in the decoder.\n");
++          default:
++            panic("Unrecognized state! %d\n", state);
++        }
++    }
++}
++
++//Either get a prefix and record it in the ExtMachInst, or send the
++//state machine on to get the opcode(s).
++X86Predecoder::State
++X86Predecoder::doPrefixState(uint8_t nextByte)
++{
++    uint8_t prefix = Prefixes[nextByte];
++    State nextState = Decoder::PrefixState;
++    // REX prefixes are only recognized in 64 bit mode.
++    if (prefix == RexPrefix && emi.mode.submode != SixtyFourBitMode)
++        prefix = 0;
++    if (prefix)
++        consumeByte();
++    switch(prefix)
++    {
++        //Operand size override prefixes
++      case OperandSizeOverride:
++        DPRINTF(X86Predecoder, "Found operand size override prefix.\n");
++        emi.legacy.op = true;
++        break;
++      case AddressSizeOverride:
++        DPRINTF(X86Predecoder, "Found address size override prefix.\n");
++        emi.legacy.addr = true;
++        break;
++        //Segment override prefixes
++      case CSOverride:
++      case DSOverride:
++      case ESOverride:
++      case FSOverride:
++      case GSOverride:
++      case SSOverride:
++        DPRINTF(X86Predecoder, "Found segment override.\n");
++        emi.legacy.seg = prefix;
++        break;
++      case Lock:
++        DPRINTF(X86Predecoder, "Found lock prefix.\n");
++        emi.legacy.lock = true;
++        break;
++      case Rep:
++        DPRINTF(X86Predecoder, "Found rep prefix.\n");
++        emi.legacy.rep = true;
++        break;
++      case Repne:
++        DPRINTF(X86Predecoder, "Found repne prefix.\n");
++        emi.legacy.repne = true;
++        break;
++      case RexPrefix:
++        DPRINTF(X86Predecoder, "Found Rex prefix %#x.\n", nextByte);
++        emi.rex = nextByte;
++        break;
++      case 0:
++        nextState = Decoder::OpcodeState;
++        break;
++      default:
++        panic("Unrecognized prefix %#x\n", nextByte);
++    }
++    return nextState;
++}
++
++//Load all the opcodes (currently up to 2) and then figure out
++//what immediate and/or ModRM is needed.
++X86Predecoder::State
++X86Predecoder::doOpcodeState(uint8_t nextByte)
++{
++    State nextState = Decoder::ErrorState;
++    emi.opcode.num++;
++    //We can't handle 3+ byte opcodes right now
++    assert(emi.opcode.num < 4);
++    consumeByte();
++    if(emi.opcode.num == 1 && nextByte == 0x0f)
++    {
++        nextState = Decoder::OpcodeState;
++        DPRINTF(X86Predecoder, "Found two byte opcode.\n");
++        emi.opcode.prefixA = nextByte;
++    }
++    else if(emi.opcode.num == 2 && (nextByte == 0x38 || nextByte == 0x3A))
++    {
++        nextState = Decoder::OpcodeState;
++        DPRINTF(X86Predecoder, "Found three byte opcode.\n");
++        emi.opcode.prefixB = nextByte;
++    }
++    else
++    {
++        DPRINTF(X86Predecoder, "Found opcode %#x.\n", nextByte);
++        emi.opcode.op = nextByte;
++
++        //Figure out the effective operand size. This can be overriden to
++        //a fixed value at the decoder level.
++        int logOpSize;
++        if (emi.rex.w)
++            logOpSize = 3; // 64 bit operand size
++        else if (emi.legacy.op)
++            logOpSize = altOp;
++        else
++            logOpSize = defOp;
++
++        //Set the actual op size
++        emi.opSize = 1 << logOpSize;
++
++        //Figure out the effective address size. This can be overriden to
++        //a fixed value at the decoder level.
++        int logAddrSize;
++        if(emi.legacy.addr)
++            logAddrSize = altAddr;
++        else
++            logAddrSize = defAddr;
++
++        //Set the actual address size
++        emi.addrSize = 1 << logAddrSize;
++
++        //Figure out the effective stack width. This can be overriden to
++        //a fixed value at the decoder level.
++        emi.stackSize = 1 << stack;
++
++        //Figure out how big of an immediate we'll retreive based
++        //on the opcode.
++        int immType = ImmediateType[emi.opcode.num - 1][nextByte];
++        if (emi.opcode.num == 1 && nextByte >= 0xA0 && nextByte <= 0xA3)
++            immediateSize = SizeTypeToSize[logAddrSize - 1][immType];
++        else
++            immediateSize = SizeTypeToSize[logOpSize - 1][immType];
++
++        //Determine what to expect next
++        if (UsesModRM[emi.opcode.num - 1][nextByte]) {
++            nextState = Decoder::ModRMState;
++        } else {
++            if(immediateSize) {
++                nextState = Decoder::ImmediateState;
++            } else {
++                instDone = true;
++                nextState = Decoder::ResetState;
++            }
++        }
++    }
++    return nextState;
++}
++
++//Get the ModRM byte and determine what displacement, if any, there is.
++//Also determine whether or not to get the SIB byte, displacement, or
++//immediate next.
++X86Predecoder::State
++X86Predecoder::doModRMState(uint8_t nextByte)
++{
++    State nextState = Decoder::ErrorState;
++    ModRM modRM;
++    modRM = nextByte;
++    DPRINTF(X86Predecoder, "Found modrm byte %#x.\n", nextByte);
++    if (defOp == 1) {
++        //figure out 16 bit displacement size
++        if ((modRM.mod == 0 && modRM.rm == 6) || modRM.mod == 2)
++            displacementSize = 2;
++        else if (modRM.mod == 1)
++            displacementSize = 1;
++        else
++            displacementSize = 0;
++    } else {
++        //figure out 32/64 bit displacement size
++        if ((modRM.mod == 0 && modRM.rm == 5) || modRM.mod == 2)
++            displacementSize = 4;
++        else if (modRM.mod == 1)
++            displacementSize = 1;
++        else
++            displacementSize = 0;
++    }
++
++    // The "test" instruction in group 3 needs an immediate, even though
++    // the other instructions with the same actual opcode don't.
++    if (emi.opcode.num == 1 && (modRM.reg & 0x6) == 0) {
++       if (emi.opcode.op == 0xF6)
++           immediateSize = 1;
++       else if (emi.opcode.op == 0xF7)
++           immediateSize = (emi.opSize == 8) ? 4 : emi.opSize;
++    }
++
++    //If there's an SIB, get that next.
++    //There is no SIB in 16 bit mode.
++    if (modRM.rm == 4 && modRM.mod != 3) {
++            // && in 32/64 bit mode)
++        nextState = Decoder::SIBState;
++    } else if(displacementSize) {
++        nextState = Decoder::DisplacementState;
++    } else if(immediateSize) {
++        nextState = Decoder::ImmediateState;
++    } else {
++        instDone = true;
++        nextState = Decoder::ResetState;
++    }
++    //The ModRM byte is consumed no matter what
++    consumeByte();
++    emi.modRM = modRM;
++    return nextState;
++}
++
++//Get the SIB byte. We don't do anything with it at this point, other
++//than storing it in the ExtMachInst. Determine if we need to get a
++//displacement or immediate next.
++X86Predecoder::State
++X86Predecoder::doSIBState(uint8_t nextByte)
++{
++    State nextState = Decoder::ErrorState;
++    emi.sib = nextByte;
++    DPRINTF(X86Predecoder, "Found SIB byte %#x.\n", nextByte);
++    consumeByte();
++    if (emi.modRM.mod == 0 && emi.sib.base == 5)
++        displacementSize = 4;
++    if (displacementSize) {
++        nextState = Decoder::DisplacementState;
++    } else if(immediateSize) {
++        nextState = Decoder::ImmediateState;
++    } else {
++        instDone = true;
++        nextState = Decoder::ResetState;
++    }
++    return nextState;
++}
++
++//Gather up the displacement, or at least as much of it
++//as we can get.
++X86Predecoder::State
++X86Predecoder::doDisplacementState()
++{
++    State nextState = Decoder::ErrorState;
++
++    getImmediate(immediateCollected,
++            emi.displacement,
++            displacementSize);
++
++    DPRINTF(X86Predecoder, "Collecting %d byte displacement, got %d bytes.\n",
++            displacementSize, immediateCollected);
++
++    if(displacementSize == immediateCollected) {
++        //Reset this for other immediates.
++        immediateCollected = 0;
++        //Sign extend the displacement
++        switch(displacementSize)
++        {
++          case 1:
++            emi.displacement = sext<8>(emi.displacement);
++            break;
++          case 2:
++            emi.displacement = sext<16>(emi.displacement);
++            break;
++          case 4:
++            emi.displacement = sext<32>(emi.displacement);
++            break;
++          default:
++            panic("Undefined displacement size!\n");
++        }
++        DPRINTF(X86Predecoder, "Collected displacement %#x.\n",
++                emi.displacement);
++        if(immediateSize) {
++            nextState = Decoder::ImmediateState;
++        } else {
++            instDone = true;
++            nextState = Decoder::ResetState;
++        }
++
++        emi.dispSize = displacementSize;
++    }
++    else
++        nextState = Decoder::DisplacementState;
++    return nextState;
++}
++
++//Gather up the immediate, or at least as much of it
++//as we can get
++X86Predecoder::State
++X86Predecoder::doImmediateState()
++{
++    State nextState = Decoder::ErrorState;
++
++    getImmediate(immediateCollected,
++            emi.immediate,
++            immediateSize);
++
++    DPRINTF(X86Predecoder, "Collecting %d byte immediate, got %d bytes.\n",
++            immediateSize, immediateCollected);
++
++    if(immediateSize == immediateCollected)
++    {
++        //Reset this for other immediates.
++        immediateCollected = 0;
++
++        //XXX Warning! The following is an observed pattern and might
++        //not always be true!
++
++        //Instructions which use 64 bit operands but 32 bit immediates
++        //need to have the immediate sign extended to 64 bits.
++        //Instructions which use true 64 bit immediates won't be
++        //affected, and instructions that use true 32 bit immediates
++        //won't notice.
++        switch(immediateSize)
++        {
++          case 4:
++            emi.immediate = sext<32>(emi.immediate);
++            break;
++          case 1:
++            emi.immediate = sext<8>(emi.immediate);
++        }
++
++        DPRINTF(X86Predecoder, "Collected immediate %#x.\n",
++                emi.immediate);
++        instDone = true;
++        nextState = Decoder::ResetState;
++    }
++    else
++        nextState = Decoder::ImmediateState;
++    return nextState;
++}
++
++}
+diff -r 936a3a8006f6 src/arch/x86/predecoder.hh
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/src/arch/x86/predecoder.hh	Wed Apr 09 15:04:53 2014 +0800
+@@ -0,0 +1,119 @@
++#ifndef __ARCH_X86_PREDECODER_HH__
++#define __ARCH_X86_PREDECODER_HH__
++
++#include <cassert>
++#include <vector>
++
++#include "arch/x86/regs/misc.hh"
++#include "arch/x86/decoder.hh"
++#include "arch/x86/types.hh"
++#include "base/bitfield.hh"
++#include "base/misc.hh"
++#include "base/trace.hh"
++#include "base/types.hh"
++#include "cpu/static_inst.hh"
++#include "debug/X86Predecoder.hh"
++
++namespace X86ISA
++{
++
++class X86Predecoder {
++
++  protected:
++    //These are defined in decode.hh
++    typedef Decoder::State State;
++    static const uint8_t * Prefixes;
++    static const uint8_t (* UsesModRM)[256];
++    static const uint8_t (* ImmediateType)[256];
++    static const uint8_t (* SizeTypeToSize)[10];
++
++  protected:
++
++    //The size of the displacement value
++    int displacementSize;
++    //The size of the immediate value
++    int immediateSize;
++    //This is how much of any immediate value we've gotten. This is used
++    //for both the actual immediate and the displacement.
++    int immediateCollected;
++
++    State state;
++    bool instDone;
++    int offset;
++    ExtMachInst emi;
++    MachInst inst;
++
++    uint8_t altOp;
++    uint8_t defOp;
++    uint8_t altAddr;
++    uint8_t defAddr;
++    uint8_t stack;
++
++  public:
++    X86Predecoder(MachInst _inst, Decoder *decoder)
++      : state(Decoder::ResetState), instDone(false), offset(0), inst(_inst) {
++        altOp = decoder->altOp;
++        defOp = decoder->defOp;
++        altAddr = decoder->altAddr;
++        defAddr = decoder->defAddr;
++        stack = decoder->stack;
++        process();
++    }
++
++    ExtMachInst& getExtMachInst() { assert(instDone); return emi; }
++    int getInstSize() { assert(instDone); return offset; }
++
++  protected:
++    void consumeByte() {
++        offset ++;
++        assert(offset<sizeof(MachInst));
++    }
++    void consumeBytes(int numBytes) {
++        offset += numBytes;
++        assert(offset<sizeof(MachInst));
++    }
++    uint8_t getNextByte() {
++        assert(offset<sizeof(MachInst));
++        return ((uint8_t *)&inst)[offset];
++    }
++
++    void getImmediate(int &collected, uint64_t &current, int size)
++    {
++        //Figure out how many bytes we still need to get for the
++        //immediate.
++        int toGet = size - collected;
++        //Figure out how many bytes are left in our "buffer"
++        int remaining = sizeof(MachInst) - offset;
++        //Get as much as we need, up to the amount available.
++        toGet = toGet > remaining ? remaining : toGet;
++
++        //Shift the bytes we want to be all the way to the right
++        uint64_t partialImm = inst >> (offset * 8);
++        //Mask off what we don't want
++        partialImm &= mask(toGet * 8);
++        //Shift it over to overlay with our displacement.
++        partialImm <<= (immediateCollected * 8);
++        //Put it into our displacement
++        current |= partialImm;
++        //Update how many bytes we've collected.
++        collected += toGet;
++        consumeBytes(toGet);
++    }
++
++
++  protected:
++    void process();
++
++    //Functions to handle each of the states
++    State doResetState();
++    State doPrefixState(uint8_t);
++    State doOpcodeState(uint8_t);
++    State doModRMState(uint8_t);
++    State doSIBState(uint8_t);
++    State doDisplacementState();
++    State doImmediateState();
++};
++
++} // namespace X86ISA
++
++#endif // __ARCH_X86_PREDECODER_HH__
+diff -r 936a3a8006f6 src/arch/x86/regs/misc.hh
+--- a/src/arch/x86/regs/misc.hh	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/arch/x86/regs/misc.hh	Wed Apr 09 15:04:53 2014 +0800
+@@ -137,6 +137,13 @@
+         //Register to keep handy values like the CPU mode in.
+         MISCREG_M5_REG,
+ 
++        // Register to keep QoS information
++        MISCREG_QR_BASE,
++        MISCREG_QR0 = MISCREG_QR_BASE,
++        MISCREG_QR1,
++        MISCREG_QR2,
++        MISCREG_QR3,
++
+         /*
+          * Model Specific Registers
+          */
+@@ -414,6 +421,13 @@
+     }
+ 
+     static inline MiscRegIndex
++    MISCREG_QR(int index)
++    {
++        assert(index >= 0 && index < 4);
++        return (MiscRegIndex)(MISCREG_QR_BASE + index);
++    }
++
++    static inline MiscRegIndex
+     MISCREG_MTRR_PHYS_BASE(int index)
+     {
+         assert(index >= 0 && index < (MISCREG_MTRR_PHYS_BASE_END -
+@@ -579,6 +593,11 @@
+         Bitfield<17, 16> stack;
+     EndBitUnion(HandyM5Reg)
+ 
++    BitUnion64(QR0)
++        Bitfield<3,0> qoscls;
++        Bitfield<15,4> priority;
++    EndBitUnion(QR0)
++
+     /**
+      * Control registers
+      */
+diff -r 936a3a8006f6 src/arch/x86/remote_gdb.cc
+--- a/src/arch/x86/remote_gdb.cc	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/arch/x86/remote_gdb.cc	Wed Apr 09 15:04:53 2014 +0800
+@@ -42,41 +42,209 @@
+ 
+ #include <string>
+ 
++#include "arch/x86/insts/badmicroop.hh"
++#include "arch/x86/decoder.hh"
++#include "arch/x86/pagetable.hh"
++#include "arch/x86/pagetable_walker.hh"
++#include "arch/x86/predecoder.hh"
++#include "arch/x86/registers.hh"
+ #include "arch/x86/remote_gdb.hh"
+-#include "arch/vtophys.hh"
++#include "arch/x86/utility.hh"
++#include "arch/x86/vtophys.hh"
+ #include "base/remote_gdb.hh"
+ #include "base/socket.hh"
+ #include "base/trace.hh"
++#include "cpu/static_inst.hh"
+ #include "cpu/thread_context.hh"
++#include "debug/GDBAcc.hh"
++#include "debug/GDBMisc.hh"
++#include "sim/full_system.hh"
+ 
+ using namespace std;
+ using namespace X86ISA;
+ 
++static inline Addr
++truncPage(Addr addr)
++{
++    return addr & ~(PageBytes - 1);
++}
++
++static inline Addr
++roundPage(Addr addr)
++{
++    return (addr + PageBytes - 1) & ~(PageBytes - 1);
++}
++
++static inline bool
++virtvalid(ThreadContext *tc, Addr vaddr)
++{
++    Walker *walker = tc->getDTBPtr()->getWalker();
++    unsigned logBytes;
++    Fault fault = walker->startFunctional(
++            tc, vaddr, logBytes, BaseTLB::Read);
++    if (fault != NoFault)
++        return false;
++    return true;
++}
++
+ RemoteGDB::RemoteGDB(System *_system, ThreadContext *c)
+     : BaseRemoteGDB(_system, c, NumGDBRegs)
+-{}
++{
++}
+ 
++/*
++ * Determine if the mapping at va..(va+len) is valid.
++ */
+ bool RemoteGDB::acc(Addr va, size_t len)
+ {
+-    panic("Remote gdb acc not implemented in x86!\n");
++    if (!FullSystem) {
++        panic("X86 RemoteGDB only support full system.\n");
++    }
++
++    Addr last_va;
++    va       = truncPage(va);
++    last_va  = roundPage(va + len);
++
++    do  {
++        if (!virtvalid(context, va)) {
++             return false;
++        }
++        va += PageBytes;
++    } while (va < last_va);
++
++    DPRINTF(GDBAcc, "acc:   %#x mapping is valid\n", va);
++    return true;
+ }
+ 
++/*
++ * Translate the kernel debugger register format into the GDB register
++ * format.
++ */
+ void RemoteGDB::getregs()
+ {
+-    panic("Remote gdb getregs not implemented in x86!\n");
++    DPRINTF(GDBAcc, "getregs in X86 RemoteGDB.\n");
++
++    memset(gdbregs.regs, 0, gdbregs.bytes());
++    gdbregs.regs[GDB_AX] = context->readIntReg(X86ISA::INTREG_RAX);
++    gdbregs.regs[GDB_BX] = context->readIntReg(X86ISA::INTREG_RBX);
++    gdbregs.regs[GDB_CX] = context->readIntReg(X86ISA::INTREG_RCX);
++    gdbregs.regs[GDB_DX] = context->readIntReg(X86ISA::INTREG_RDX);
++    gdbregs.regs[GDB_SI] = context->readIntReg(X86ISA::INTREG_RSI);
++    gdbregs.regs[GDB_DI] = context->readIntReg(X86ISA::INTREG_RDI);
++    gdbregs.regs[GDB_BP] = context->readIntReg(X86ISA::INTREG_RBP);
++    gdbregs.regs[GDB_SP] = context->readIntReg(X86ISA::INTREG_RSP);
++    gdbregs.regs[GDB_R8] = context->readIntReg(X86ISA::INTREG_R8);
++    gdbregs.regs[GDB_R9] = context->readIntReg(X86ISA::INTREG_R9);
++    gdbregs.regs[GDB_R10] = context->readIntReg(X86ISA::INTREG_R10);
++    gdbregs.regs[GDB_R11] = context->readIntReg(X86ISA::INTREG_R11);
++    gdbregs.regs[GDB_R12] = context->readIntReg(X86ISA::INTREG_R12);
++    gdbregs.regs[GDB_R13] = context->readIntReg(X86ISA::INTREG_R13);
++    gdbregs.regs[GDB_R14] = context->readIntReg(X86ISA::INTREG_R14);
++    gdbregs.regs[GDB_R15] = context->readIntReg(X86ISA::INTREG_R15);
++
++    gdbregs.regs[GDB_PC] = context->pcState().pc();
++
++    gdbregs.regs[GDB_CS_PS] = context->readMiscReg(X86ISA::MISCREG_CS) << 32 |
++                                       context->readMiscReg(X86ISA::MISCREG_RFLAGS);
++    gdbregs.regs[GDB_DS_SS] = context->readMiscReg(X86ISA::MISCREG_DS) << 32 |
++                                       context->readMiscReg(X86ISA::MISCREG_SS);
++    gdbregs.regs[GDB_FS_ES] = context->readMiscReg(X86ISA::MISCREG_FS) << 32 |
++                                       context->readMiscReg(X86ISA::MISCREG_ES);
++    gdbregs.regs[GDB_GS]    = context->readMiscReg(X86ISA::MISCREG_GS);
+ }
+ 
+ void RemoteGDB::setregs()
+ {
+-    panic("Remote gdb setregs not implemented in x86!\n");
++    DPRINTF(GDBAcc, "setregs in X86 RemoteGDB.\n");
++    warn("X86ISA::RemoteGDB::setregs() not fully tested, this may damage your simulated system.");
++    context->setIntReg(X86ISA::INTREG_RAX, gdbregs.regs[GDB_AX]);
++    context->setIntReg(X86ISA::INTREG_RBX, gdbregs.regs[GDB_BX]);
++    context->setIntReg(X86ISA::INTREG_RCX, gdbregs.regs[GDB_CX]);
++    context->setIntReg(X86ISA::INTREG_RDX, gdbregs.regs[GDB_DX]);
++    context->setIntReg(X86ISA::INTREG_RSI, gdbregs.regs[GDB_SI]);
++    context->setIntReg(X86ISA::INTREG_RDI, gdbregs.regs[GDB_DI]);
++    context->setIntReg(X86ISA::INTREG_RBP, gdbregs.regs[GDB_BP]);
++    context->setIntReg(X86ISA::INTREG_RSP, gdbregs.regs[GDB_SP]);
++    context->setIntReg(X86ISA::INTREG_R8,  gdbregs.regs[GDB_R8]);
++    context->setIntReg(X86ISA::INTREG_R9,  gdbregs.regs[GDB_R9]);
++    context->setIntReg(X86ISA::INTREG_R10, gdbregs.regs[GDB_R10]);
++    context->setIntReg(X86ISA::INTREG_R11, gdbregs.regs[GDB_R11]);
++    context->setIntReg(X86ISA::INTREG_R12, gdbregs.regs[GDB_R12]);
++    context->setIntReg(X86ISA::INTREG_R13, gdbregs.regs[GDB_R13]);
++    context->setIntReg(X86ISA::INTREG_R14, gdbregs.regs[GDB_R14]);
++    context->setIntReg(X86ISA::INTREG_R15, gdbregs.regs[GDB_R15]);
++    context->pcState().set(gdbregs.regs[GDB_PC]);
++    context->setMiscReg(X86ISA::MISCREG_RFLAGS, bits(gdbregs.regs[GDB_CS_PS], 31, 0));
++    context->setMiscReg(X86ISA::MISCREG_CS,     bits(gdbregs.regs[GDB_CS_PS], 63, 32));
++    context->setMiscReg(X86ISA::MISCREG_SS,     bits(gdbregs.regs[GDB_DS_SS], 31,  0));
++    context->setMiscReg(X86ISA::MISCREG_DS,     bits(gdbregs.regs[GDB_DS_SS], 63, 32));
++    context->setMiscReg(X86ISA::MISCREG_ES,     bits(gdbregs.regs[GDB_FS_ES], 31,  0));
++    context->setMiscReg(X86ISA::MISCREG_FS,     bits(gdbregs.regs[GDB_FS_ES], 63, 32));
++    context->setMiscReg(X86ISA::MISCREG_GS,     bits(gdbregs.regs[GDB_GS],    31,  0));
+ }
+ 
++
+ void RemoteGDB::clearSingleStep()
+ {
+-    panic("Remote gdb clearSingleStep not implemented in x86!\n");
++    DPRINTF(GDBMisc, "clearSingleStep bt_addr=%#x nt_addr=%#x\n",
++            takenBkpt, notTakenBkpt);
++
++    if (takenBkpt != 0)
++        clearTempBreakpoint(takenBkpt);
++
++    if (notTakenBkpt != 0)
++        clearTempBreakpoint(notTakenBkpt);
+ }
+ 
+ void RemoteGDB::setSingleStep()
+ {
+-    panic("Remoge gdb setSingleStep not implemented in x86!\n");
++    PCState pc = context->pcState();
++    PCState bpc;
++    bool set_bt = false;
++
++    // User was stopped at pc, e.g. the instruction at pc was not
++    // executed.
++    Decoder *decoder = context->getDecoderPtr();
++    X86Predecoder predecoder(read<MachInst>(pc.pc()), decoder);
++    ExtMachInst &emi = predecoder.getExtMachInst();
++
++    // we assert X86Inst are all MacroopInst
++    StaticInstPtr si = decoder->decodeInst(emi);
++    assert (si->isMacroop());
++
++    pc.size(predecoder.getInstSize());
++    pc.npc(pc.pc() + pc.size());
++
++    MicroPC microPC = 0;
++    StaticInstPtr msi = NULL;
++    while ((msi = si->fetchMicroop(microPC++)) != badMicroop)
++    {
++        if (msi->getName() == "wrip") {
++/*
++            uint64_t SrcReg1 = context->readIntReg(msi->srcRegIdx(0));
++            uint64_t SrcReg2 = context->readIntReg(msi->srcRegIdx(1));
++            uint64_t CSBase  = context->readIntReg(msi->srcRegIdx(2));
++            DPRINTF(GDBMisc, "found a branch inst @ %#x\n", pc.pc());
++            DPRINTF(GDBMisc, "  SrcReg1 = %#x;  srcReg2 = %#x;  CSBase= %#x\n",
++                    SrcReg1, SrcReg2, CSBase);
++*/
++        }
++        else if (msi->getName() == "wripi") {
++            DPRINTF(GDBMisc, "found a branch inst @ %#x\n", pc.pc());
++        }
++/*
++        if (bpc.pc() != pc.npc())
++            set_bt = true;
++*/
++    }
++
++
++    setTempBreakpoint(notTakenBkpt = pc.npc());
++
++    if (set_bt)
++        setTempBreakpoint(takenBkpt = bpc.pc());
++
++    DPRINTF(GDBMisc, "setSingleStep bt_addr=%#x nt_addr=%#x\n",
++            takenBkpt, notTakenBkpt);
+ }
++
+diff -r 936a3a8006f6 src/arch/x86/remote_gdb.hh
+--- a/src/arch/x86/remote_gdb.hh	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/arch/x86/remote_gdb.hh	Wed Apr 09 15:04:53 2014 +0800
+@@ -53,6 +53,36 @@
+       protected:
+         enum RegisterContants
+         {
++            /* Below are 8-byte length */
++            GDB_AX,                 /* 0 */
++            GDB_BX,                 /* 1 */
++            GDB_CX,                 /* 2 */
++            GDB_DX,                 /* 3 */
++            GDB_SI,                 /* 4 */
++            GDB_DI,                 /* 5 */
++            GDB_BP,                 /* 6 */
++            GDB_SP,                 /* 7 */
++            GDB_R8,                 /* 8 */
++            GDB_R9,                 /* 9 */
++            GDB_R10,                /* 10 */
++            GDB_R11,                /* 11 */
++            GDB_R12,                /* 12 */
++            GDB_R13,                /* 13 */
++            GDB_R14,                /* 14 */
++            GDB_R15,                /* 15 */
++            GDB_PC,                 /* 16 */
++            /* Below are 4byte length */
++            GDB_CS_PS,
++            GDB_DS_SS,
++            GDB_FS_ES,
++            GDB_GS,
++            //GDB_PS,                 /* 17 */
++            //GDB_CS,                 /* 18 */
++            //GDB_SS,                 /* 19 */
++            //GDB_DS,                 /* 20 */
++            //GDB_ES,                 /* 21 */
++            //GDB_FS,                 /* 22 */
++            //GDB_GS,                 /* 23 */
+             NumGDBRegs
+             //XXX fill this in
+         };
+@@ -70,6 +100,8 @@
+         void setSingleStep();
+ 
+         Addr nextBkpt;
++        Addr notTakenBkpt;
++        Addr takenBkpt;
+     };
+ }
+ 
+diff -r 936a3a8006f6 src/base/remote_gdb.cc
+--- a/src/base/remote_gdb.cc	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/base/remote_gdb.cc	Wed Apr 09 15:04:53 2014 +0800
+@@ -137,6 +137,7 @@
+ #include "mem/se_translating_port_proxy.hh"
+ #include "sim/full_system.hh"
+ #include "sim/system.hh"
++#include "base/loader/object_file.hh"
+ 
+ using namespace std;
+ using namespace Debug;
+@@ -839,7 +840,7 @@
+             if (*p++ != ',') send("E0D");
+             val = hex2i(&p);
+             if (*p++ != ',') send("E0D");
+-            len = hex2i(&p);
++            len = hex2i(&p) * sizeof(TheISA::MachInst);
+ 
+             DPRINTF(GDBMisc, "clear %s, addr=%#x, len=%d\n",
+                     break_type(subcmd), val, len);
+@@ -871,7 +872,7 @@
+             if (*p++ != ',') send("E0D");
+             val = hex2i(&p);
+             if (*p++ != ',') send("E0D");
+-            len = hex2i(&p);
++            len = hex2i(&p) * sizeof(TheISA::MachInst);
+ 
+             DPRINTF(GDBMisc, "set %s, addr=%#x, len=%d\n",
+                     break_type(subcmd), val, len);
+@@ -902,6 +903,19 @@
+             var = string(p, datalen - 1);
+             if (var == "C")
+                 send("QC0");
++            else if(var == "Attached")
++                send("1");
++/*
++            else if (var == "Offsets")
++            {
++                char obuf[256];
++                snprintf(obuf, 256, "Text=%lx;Data=%lx;Bss=%lx",
++                    context->getSystemPtr()->kernel->textBase(),
++                    context->getSystemPtr()->kernel->dataBase(),
++                    context->getSystemPtr()->kernel->bssBase());
++                send(obuf);
++            }
++*/
+             else
+                 send("");
+             continue;
+diff -r 936a3a8006f6 src/base/types.hh
+--- a/src/base/types.hh	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/base/types.hh	Wed Apr 09 15:04:53 2014 +0800
+@@ -180,4 +180,6 @@
+ template <class T> class RefCountingPtr;
+ typedef RefCountingPtr<FaultBase> Fault;
+ 
++typedef uint16_t GuestID;
++
+ #endif // __BASE_TYPES_HH__
+diff -r 936a3a8006f6 src/cpu/base_dyn_inst.hh
+--- a/src/cpu/base_dyn_inst.hh	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/cpu/base_dyn_inst.hh	Wed Apr 09 15:04:53 2014 +0800
+@@ -889,8 +889,14 @@
+         sreqLow = savedSreqLow;
+         sreqHigh = savedSreqHigh;
+     } else {
++        #if THE_ISA == X86_ISA
++        uint64_t qr0 = this->cpu->readMiscRegNoEffect(TheISA::MISCREG_QR0,
++                                                      this->threadNumber);
++        #else
++        uint64_t qr0 = 0;
++        #endif
+         req = new Request(asid, addr, size, flags, masterId(), this->pc.instAddr(),
+-                          thread->contextId(), threadNumber);
++                          thread->contextId(), threadNumber, qr0);
+ 
+         req->taskId(cpu->taskId());
+ 
+@@ -954,8 +960,14 @@
+         sreqLow = savedSreqLow;
+         sreqHigh = savedSreqHigh;
+     } else {
++        #if THE_ISA == X86_ISA
++        uint64_t qr0 = this->cpu->readMiscRegNoEffect(TheISA::MISCREG_QR0,
++                                                      this->threadNumber);
++        #else
++        uint64_t qr0 = 0;
++        #endif
+         req = new Request(asid, addr, size, flags, masterId(), this->pc.instAddr(),
+-                          thread->contextId(), threadNumber);
++                          thread->contextId(), threadNumber, qr0);
+ 
+         req->taskId(cpu->taskId());
+ 
+diff -r 936a3a8006f6 src/cpu/o3/fetch_impl.hh
+--- a/src/cpu/o3/fetch_impl.hh	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/cpu/o3/fetch_impl.hh	Wed Apr 09 15:04:53 2014 +0800
+@@ -601,8 +601,12 @@
+     // Build request here.
+     RequestPtr mem_req =
+         new Request(tid, fetchBufferBlockPC, fetchBufferSize,
+-                    Request::INST_FETCH, cpu->instMasterId(), pc,
+-                    cpu->thread[tid]->contextId(), tid);
++        Request::INST_FETCH, cpu->instMasterId(), pc,
++        cpu->thread[tid]->contextId(), tid);
++
++#if THE_ISA == X86_ISA
++    mem_req->setQosTag(cpu->readMiscRegNoEffect(TheISA::MISCREG_QR0, tid));
++#endif
+ 
+     mem_req->taskId(cpu->taskId());
+ 
+diff -r 936a3a8006f6 src/cpu/simple/atomic.cc
+--- a/src/cpu/simple/atomic.cc	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/cpu/simple/atomic.cc	Wed Apr 09 15:04:53 2014 +0800
+@@ -314,6 +314,11 @@
+ {
+     // use the CPU's statically allocated read request and packet objects
+     Request *req = &data_read_req;
++    #if THE_ISA == X86_ISA
++    uint64_t qr0 = thread->readMiscRegNoEffect(TheISA::MISCREG_QR0);
++    #else
++    uint64_t qr0 = 0;
++    #endif
+ 
+     if (traceData) {
+         traceData->setAddr(addr);
+@@ -334,6 +339,7 @@
+     req->taskId(taskId());
+     while (1) {
+         req->setVirt(0, addr, size, flags, dataMasterId(), thread->pcState().instAddr());
++        req->setQosTag(qr0);
+ 
+         // translate to physical address
+         Fault fault = thread->dtb->translateAtomic(req, tc, BaseTLB::Read);
+@@ -411,6 +417,11 @@
+ 
+     // use the CPU's statically allocated write request and packet objects
+     Request *req = &data_write_req;
++    #if THE_ISA == X86_ISA
++    uint64_t qr0 = thread->readMiscRegNoEffect(TheISA::MISCREG_QR0);
++    #else
++    uint64_t qr0 = 0;
++    #endif
+ 
+     if (traceData) {
+         traceData->setAddr(addr);
+@@ -431,6 +442,7 @@
+     req->taskId(taskId());
+     while(1) {
+         req->setVirt(0, addr, size, flags, dataMasterId(), thread->pcState().instAddr());
++        req->setQosTag(qr0);
+ 
+         // translate to physical address
+         Fault fault = thread->dtb->translateAtomic(req, tc, BaseTLB::Write);
+@@ -536,6 +548,11 @@
+         if (needToFetch) {
+             ifetch_req.taskId(taskId());
+             setupFetchRequest(&ifetch_req);
++            #if THE_ISA == X86_ISA
++            ifetch_req.setQosTag(thread->readMiscRegNoEffect(TheISA::MISCREG_QR0));
++            #else
++            ifetch_req.setQosTag(0);
++            #endif
+             fault = thread->itb->translateAtomic(&ifetch_req, tc,
+                                                  BaseTLB::Execute);
+         }
+diff -r 936a3a8006f6 src/cpu/simple/timing.cc
+--- a/src/cpu/simple/timing.cc	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/cpu/simple/timing.cc	Wed Apr 09 15:04:53 2014 +0800
+@@ -408,13 +408,18 @@
+     const Addr pc = thread->instAddr();
+     unsigned block_size = cacheLineSize();
+     BaseTLB::Mode mode = BaseTLB::Read;
++    #if THE_ISA==X86_ISA
++    uint64_t qr0 = thread->readMiscRegNoEffect(TheISA::MISCREG_QR0);
++    #else
++    uint64_t qr0 = 0;
++    #endif
+ 
+     if (traceData) {
+         traceData->setAddr(addr);
+     }
+ 
+     RequestPtr req  = new Request(asid, addr, size,
+-                                  flags, dataMasterId(), pc, _cpuId, tid);
++                                  flags, dataMasterId(), pc, _cpuId, tid, qr0);
+ 
+     req->taskId(taskId());
+ 
+@@ -477,6 +482,11 @@
+     const Addr pc = thread->instAddr();
+     unsigned block_size = cacheLineSize();
+     BaseTLB::Mode mode = BaseTLB::Write;
++    #if THE_ISA==X86_ISA
++    uint64_t qr0 = thread->readMiscRegNoEffect(TheISA::MISCREG_QR0);
++    #else
++    uint64_t qr0 = 0;
++    #endif
+ 
+     if (data == NULL) {
+         assert(flags & Request::CACHE_BLOCK_ZERO);
+@@ -491,7 +501,7 @@
+     }
+ 
+     RequestPtr req = new Request(asid, addr, size,
+-                                 flags, dataMasterId(), pc, _cpuId, tid);
++                                 flags, dataMasterId(), pc, _cpuId, tid, qr0);
+ 
+     req->taskId(taskId());
+ 
+@@ -575,6 +585,11 @@
+         ifetch_req->taskId(taskId());
+         ifetch_req->setThreadContext(_cpuId, /* thread ID */ 0);
+         setupFetchRequest(ifetch_req);
++        #if THE_ISA==X86_ISA
++        ifetch_req->setQosTag(this->readMiscRegNoEffect(TheISA::MISCREG_QR0));
++        #else
++        ifetch_req->setQosTag(0);
++        #endif
+         DPRINTF(SimpleCPU, "Translating address %#x\n", ifetch_req->getVaddr());
+         thread->itb->translateTiming(ifetch_req, tc, &fetchTranslation,
+                 BaseTLB::Execute);
+diff -r 936a3a8006f6 src/dev/ide_ctrl.cc
+--- a/src/dev/ide_ctrl.cc	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/dev/ide_ctrl.cc	Wed Apr 09 15:04:53 2014 +0800
+@@ -101,7 +101,7 @@
+     ioEnabled(false), bmEnabled(false),
+     ioShift(p->io_shift), ctrlOffset(p->ctrl_offset)
+ {
+-    if (params()->disks.size() > 3)
++    if (params()->disks.size() > 4)
+         panic("IDE controllers support a maximum of 4 devices attached!\n");
+ 
+     // Assign the disks to channels
+diff -r 936a3a8006f6 src/mem/cache/blk.hh
+--- a/src/mem/cache/blk.hh	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/mem/cache/blk.hh	Wed Apr 09 15:04:53 2014 +0800
+@@ -121,6 +121,9 @@
+     /** Number of references to this block since it was brought in. */
+     int refCount;
+ 
++    /** majiuyue: holds the qos tag of target process */
++    int qosTag;
++
+     /** holds the source requestor ID for this block. */
+     int srcMasterId;
+ 
+@@ -172,6 +175,7 @@
+         : task_id(ContextSwitchTaskId::Unknown),
+           asid(-1), tag(0), data(0) ,size(0), status(0), whenReady(0),
+           set(-1), isTouched(false), refCount(0),
++          qosTag(-1),
+           srcMasterId(Request::invldMasterId),
+           tickInserted(0)
+     {}
+diff -r 936a3a8006f6 src/mem/cache/cache_impl.hh
+--- a/src/mem/cache/cache_impl.hh	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/mem/cache/cache_impl.hh	Wed Apr 09 15:04:53 2014 +0800
+@@ -340,6 +340,7 @@
+         }
+         std::memcpy(blk->data, pkt->getPtr<uint8_t>(), blkSize);
+         blk->status |= BlkDirty;
++        blk->qosTag = pkt->getQosTag();
+         if (pkt->isSupplyExclusive()) {
+             blk->status |= BlkWritable;
+         }
+@@ -1096,6 +1097,7 @@
+     Request *writebackReq =
+         new Request(tags->regenerateBlkAddr(blk->tag, blk->set), blkSize, 0,
+                 Request::wbMasterId);
++    writebackReq->setQosTag(blk->qosTag);
+     if (blk->isSecure())
+         writebackReq->setFlags(Request::SECURE);
+ 
+@@ -1282,6 +1284,7 @@
+     if (is_secure)
+         blk->status |= BlkSecure;
+     blk->status |= BlkValid | BlkReadable;
++    blk->qosTag = pkt->getQosTag();
+ 
+     if (!pkt->sharedAsserted()) {
+         blk->status |= BlkWritable;
+diff -r 936a3a8006f6 src/mem/dram_ctrl.cc
+--- a/src/mem/dram_ctrl.cc	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/mem/dram_ctrl.cc	Wed Apr 09 15:04:53 2014 +0800
+@@ -48,6 +48,7 @@
+ #include "debug/Drain.hh"
+ #include "mem/dram_ctrl.hh"
+ #include "sim/system.hh"
++#include "sim/full_system.hh"
+ 
+ using namespace std;
+ 
+@@ -137,7 +138,8 @@
+ DRAMCtrl::init()
+ {
+     if (!port.isConnected()) {
+-        fatal("DRAMCtrl %s is unconnected!\n", name());
++        if (FullSystem)
++            fatal("DRAMCtrl %s is unconnected!\n", name());
+     } else {
+         port.sendRangeChange();
+     }
+diff -r 936a3a8006f6 src/mem/packet.hh
+--- a/src/mem/packet.hh	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/mem/packet.hh	Wed Apr 09 15:04:53 2014 +0800
+@@ -248,6 +248,7 @@
+     /// Are the 'addr' and 'size' fields valid?
+     static const FlagsType VALID_ADDR             = 0x00000100;
+     static const FlagsType VALID_SIZE             = 0x00000200;
++    static const FlagsType VALID_QOSTAG           = 0x00000800;
+     /// Is the data pointer set to a value that shouldn't be freed
+     /// when the packet is destroyed?
+     static const FlagsType STATIC_DATA            = 0x00001000;
+@@ -282,6 +283,9 @@
+     */
+     PacketDataPtr data;
+ 
++    // QoS tag of this packet
++    uint64_t qosTag;
++
+     /// The address of the request.  This address could be virtual or
+     /// physical, depending on the system configuration.
+     Addr addr;
+@@ -552,6 +556,13 @@
+     /// Reset destination field, e.g. to turn a response into a request again.
+     void clearDest() { dest = InvalidPortID; }
+ 
++    uint64_t getQosTag() const { assert(flags.isSet(VALID_QOSTAG)); return qosTag; }
++    void setQosTag(uint64_t tag) {
++        qosTag = tag; flags.set(VALID_QOSTAG);
++        req->setQosTag(tag);
++    }
++    bool hasQosTag() { return flags.isSet(VALID_QOSTAG); }
++
+     Addr getAddr() const { assert(flags.isSet(VALID_ADDR)); return addr; }
+     /**
+      * Update the address of this packet mid-transaction. This is used
+@@ -616,6 +627,10 @@
+             size = req->getSize();
+             flags.set(VALID_SIZE);
+         }
++        if (req->hasQosTag()) {
++            qosTag = req->getQosTag();
++            flags.set(VALID_QOSTAG);
++        }
+     }
+ 
+     /**
+@@ -637,6 +652,10 @@
+         }
+         size = _blkSize;
+         flags.set(VALID_SIZE);
++        if (req->hasQosTag()) {
++            qosTag = req->getQosTag();
++            flags.set(VALID_QOSTAG);
++        }
+     }
+ 
+     /**
+@@ -649,6 +668,7 @@
+     Packet(Packet *pkt, bool clearFlags = false)
+         :  cmd(pkt->cmd), req(pkt->req),
+            data(pkt->flags.isSet(STATIC_DATA) ? pkt->data : NULL),
++           qosTag(pkt->qosTag),
+            addr(pkt->addr), _isSecure(pkt->_isSecure), size(pkt->size),
+            src(pkt->src), dest(pkt->dest),
+            bytesValidStart(pkt->bytesValidStart),
+@@ -662,7 +682,7 @@
+ 
+         flags.set(pkt->flags & (VALID_ADDR|VALID_SIZE));
+         flags.set(pkt->flags & STATIC_DATA);
+-
++        flags.set(pkt->flags & VALID_QOSTAG);
+     }
+ 
+     /**
+diff -r 936a3a8006f6 src/mem/protocol/RubySlicc_Exports.sm
+--- a/src/mem/protocol/RubySlicc_Exports.sm	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/mem/protocol/RubySlicc_Exports.sm	Wed Apr 09 15:04:53 2014 +0800
+@@ -32,7 +32,7 @@
+ external_type(bool, primitive="yes", default="false");
+ external_type(std::string, primitive="yes");
+ external_type(uint32_t, primitive="yes");
+-external_type(uint64, primitive="yes");
++external_type(uint64_t, primitive="yes");
+ external_type(PacketPtr, primitive="yes");
+ external_type(Packet, primitive="yes");
+ external_type(Address);
+diff -r 936a3a8006f6 src/mem/protocol/RubySlicc_MemControl.sm
+--- a/src/mem/protocol/RubySlicc_MemControl.sm	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/mem/protocol/RubySlicc_MemControl.sm	Wed Apr 09 15:04:53 2014 +0800
+@@ -56,6 +56,7 @@
+   MachineID Sender,             desc="What component sent the data";
+   MachineID OriginalRequestorMachId, desc="What component originally requested";
+   DataBlock DataBlk,            desc="Data to writeback";
++  uint64_t QosTag, default="0xFFFFFFFFFFFFFFFF", desc="QoS Tag of this request";
+   MessageSizeType MessageSize,  desc="size category of the message";
+   // Not all fields used by all protocols:
+   PrefetchBit Prefetch,         desc="Is this a prefetch request";
+diff -r 936a3a8006f6 src/mem/protocol/RubySlicc_Types.sm
+--- a/src/mem/protocol/RubySlicc_Types.sm	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/mem/protocol/RubySlicc_Types.sm	Wed Apr 09 15:04:53 2014 +0800
+@@ -116,6 +116,7 @@
+ }
+ 
+ structure(RubyRequest, desc="...", interface="Message", external="yes") {
++  uint64_t QosTag, default="0xAAAAAAAAAAAAAAAA", desc="QoS tag of this request";
+   Address LineAddress,       desc="Line address for this request";
+   Address PhysicalAddress,   desc="Physical address for this request";
+   RubyRequestType Type,      desc="Type of request (LD, ST, etc)";
+diff -r 936a3a8006f6 src/mem/request.hh
+--- a/src/mem/request.hh	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/mem/request.hh	Wed Apr 09 15:04:53 2014 +0800
+@@ -108,11 +108,11 @@
+     /** The request is to an uncacheable address. */
+     static const FlagsType UNCACHEABLE                 = 0x00001000;
+     /** This request is to a memory mapped register. */
+-    static const FlagsType MMAPPED_IPR                  = 0x00002000;
++    static const FlagsType MMAPPED_IPR                 = 0x00002000;
+     /** This request is a clear exclusive. */
+     static const FlagsType CLEAR_LL                    = 0x00004000;
+     /** This request is made in privileged mode. */
+-    static const FlagsType PRIVILEGED                   = 0x00008000;
++    static const FlagsType PRIVILEGED                  = 0x00008000;
+ 
+     /** This is a write that is targeted and zeroing an entire cache block.
+      * There is no need for a read/modify/write
+@@ -192,6 +192,9 @@
+     /** Whether or not the sc result is valid. */
+     static const PrivateFlagsType VALID_EXTRA_DATA     = 0x00000080;
+ 
++    /** Whether or not the qosTag result is valid. */
++    static const PrivateFlagsType VALID_QOSTAG         = 0x00000008;
++
+     /** These flags are *not* cleared when a Request object is reused
+        (assigned a new address). */
+     static const PrivateFlagsType STICKY_PRIVATE_FLAGS =
+@@ -250,6 +253,9 @@
+     /** The thread ID (id within this CPU) */
+     int _threadId;
+ 
++    /** QoS tag */
++    uint64_t _qosTag;
++
+     /** program counter of initiating access; for tracing/debugging */
+     Addr _pc;
+ 
+@@ -296,6 +302,15 @@
+         setThreadContext(cid, tid);
+     }
+ 
++    Request(int asid, Addr vaddr, int size, Flags flags, MasterID mid, Addr pc,
++            int cid, ThreadID tid, uint64_t qosTag)
++    {
++        setVirt(asid, vaddr, size, flags, mid, pc);
++        setThreadContext(cid, tid);
++        _qosTag = qosTag;
++        privateFlags.set(VALID_QOSTAG);
++    }
++
+     ~Request() {}
+ 
+     /**
+@@ -325,6 +340,8 @@
+         _flags.set(flags);
+         privateFlags.clear(~STICKY_PRIVATE_FLAGS);
+         privateFlags.set(VALID_PADDR|VALID_SIZE);
++        _qosTag = 0xFFFFFFFFFFFFFFF;
++        privateFlags.set(VALID_QOSTAG);
+         depth = 0;
+         accessDelta = 0;
+         //translateDelta = 0;
+@@ -483,6 +500,7 @@
+     }
+ 
+     /** Accessor function for vaddr.*/
++    bool hasVaddr() { return privateFlags.isSet(VALID_VADDR); }
+     Addr
+     getVaddr()
+     {
+@@ -617,6 +635,26 @@
+     void setAccessLatency() { accessDelta = curTick() - _time - translateDelta; }
+     Tick getAccessLatency() const { return accessDelta; }
+ 
++    /** Accessor function for QoS. */
++    uint64_t
++    getQosTag() const
++    {
++        assert(privateFlags.isSet(VALID_QOSTAG));
++        return _qosTag;
++    }
++
++    bool
++    hasQosTag() const
++    {
++        return privateFlags.isSet(VALID_QOSTAG);
++    }
++
++    void
++    setQosTag(uint64_t qosTag) {
++        _qosTag = qosTag;
++        privateFlags.set(VALID_QOSTAG);
++    }
++
+     /** Accessor functions for flags.  Note that these are for testing
+        only; setting flags should be done via setFlags(). */
+     bool isUncacheable() const { return _flags.isSet(UNCACHEABLE); }
+diff -r 936a3a8006f6 src/mem/ruby/slicc_interface/RubyRequest.hh
+--- a/src/mem/ruby/slicc_interface/RubyRequest.hh	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/mem/ruby/slicc_interface/RubyRequest.hh	Wed Apr 09 15:04:53 2014 +0800
+@@ -40,6 +40,7 @@
+ class RubyRequest : public Message
+ {
+   public:
++    uint64_t m_QosTag;
+     Address m_PhysicalAddress;
+     Address m_LineAddress;
+     RubyRequestType m_Type;
+@@ -56,6 +57,7 @@
+         PacketPtr _pkt, PrefetchBit _pb = PrefetchBit_No,
+         unsigned _proc_id = 100)
+         : Message(curTime),
++          m_QosTag(_pkt->getQosTag()&0x0FFFFFFFFFFFFFFF),
+           m_PhysicalAddress(_paddr),
+           m_Type(_type),
+           m_ProgramCounter(_pc),
+@@ -81,6 +83,8 @@
+     const int& getSize() const { return m_Size; }
+     const PrefetchBit& getPrefetch() const { return m_Prefetch; }
+ 
++    const uint64_t getQosTag() const { return m_QosTag; }
++
+     void print(std::ostream& out) const;
+     bool functionalRead(Packet *pkt);
+     bool functionalWrite(Packet *pkt);
+diff -r 936a3a8006f6 src/mem/ruby/system/Cache.py
+--- a/src/mem/ruby/system/Cache.py	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/mem/ruby/system/Cache.py	Wed Apr 09 15:04:53 2014 +0800
+@@ -47,3 +47,4 @@
+     dataAccessLatency = Param.Cycles(1, "cycles for a data array access")
+     tagAccessLatency = Param.Cycles(1, "cycles for a tag array access")
+     resourceStalls = Param.Bool(False, "stall if there is a resource failure")
++
+diff -r 936a3a8006f6 src/mem/slicc/symbols/StateMachine.py
+--- a/src/mem/slicc/symbols/StateMachine.py	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/mem/slicc/symbols/StateMachine.py	Wed Apr 09 15:04:53 2014 +0800
+@@ -35,9 +35,11 @@
+ python_class_map = {
+                     "int": "Int",
+                     "uint32_t" : "UInt32",
++                    "uint64_t" : "UInt64",
+                     "std::string": "String",
+                     "bool": "Bool",
+                     "CacheMemory": "RubyCache",
++                    "AbstractCacheMemory": "RubyAbstractCache",
+                     "WireBuffer": "RubyWireBuffer",
+                     "Sequencer": "RubySequencer",
+                     "DirectoryMemory": "RubyDirectoryMemory",
+diff -r 936a3a8006f6 src/python/m5/params.py
+--- a/src/python/m5/params.py	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/python/m5/params.py	Wed Apr 09 15:04:53 2014 +0800
+@@ -639,6 +639,93 @@
+                          int(self.intlvHighBit), int(self.intlvBits),
+                          int(self.intlvMatch))
+ 
++class GuestID(CheckedInt):
++    cxx_type = 'GuestID'
++    size = 16
++    unsigned = True
++
++class GuestAddrRange(ParamValue):
++    cxx_type = 'GuestAddrRange'
++
++    def __init__(self, *args, **kwargs):
++        # Disable interleaving by default
++        self.intlvHighBit = 0
++        self.intlvBits = 0
++        self.intlvMatch = 0
++
++        def handle_kwargs(self, kwargs):
++            # An address range needs to have an upper limit, specified
++            # either explicitly with an end, or as an offset using the
++            # size keyword.
++            if 'end' in kwargs:
++                self.end = Addr(kwargs.pop('end'))
++            elif 'size' in kwargs:
++                self.end = self.start + Addr(kwargs.pop('size')) - 1
++            else:
++                raise TypeError, "Either end or size must be specified"
++
++            # Now on to the optional bit
++            if 'intlvHighBit' in kwargs:
++                self.intlvHighBit = int(kwargs.pop('intlvHighBit'))
++            if 'intlvBits' in kwargs:
++                self.intlvBits = int(kwargs.pop('intlvBits'))
++            if 'intlvMatch' in kwargs:
++                self.intlvMatch = int(kwargs.pop('intlvMatch'))
++
++        if 'guestID' in kwargs:
++            self.guestID = GuestID(kwargs.pop('guestID'))
++        else:
++            raise TypeError, "guestID must be specified in kwargs"
++
++        if len(args) == 0:
++            self.start = Addr(kwargs.pop('start'))
++            handle_kwargs(self, kwargs)
++
++        elif len(args) == 1:
++            if kwargs:
++                self.start = Addr(args[0])
++                handle_kwargs(self, kwargs)
++            elif isinstance(args[0], (list, tuple)):
++                self.start = Addr(args[0][0])
++                self.end = Addr(args[0][1])
++            else:
++                self.start = Addr(0)
++                self.end = Addr(args[0]) - 1
++
++        elif len(args) == 2:
++            self.start = Addr(args[0])
++            self.end = Addr(args[1])
++        else:
++            raise TypeError, "Too many arguments specified"
++
++        if kwargs:
++            raise TypeError, "Too many keywords: %s" % kwargs.keys()
++
++    def __str__(self):
++        return '(%s)%s:%s' % (self.guestID, self.start, self.end)
++
++    def size(self):
++        # Divide the size by the size of the interleaving slice
++        return (long(self.end) - long(self.start) + 1) >> self.intlvBits
++
++    @classmethod
++    def cxx_predecls(cls, code):
++        Addr.cxx_predecls(code)
++        code('#include "hyper/base/guest_addr_range.hh"')
++
++    @classmethod
++    def swig_predecls(cls, code):
++        Addr.swig_predecls(code)
++
++    def getValue(self):
++        # Go from the Python class to the wrapped C++ class generated
++        # by swig
++        from m5.internal.xrange import GuestAddrRange
++
++        return GuestAddrRange(long(self.start), long(self.end),
++                         int(self.intlvHighBit), int(self.intlvBits),
++                         int(self.intlvMatch), int(self.guestID))
++
+ # Boolean parameter type.  Python doesn't let you subclass bool, since
+ # it doesn't want to let you create multiple instances of True and
+ # False.  Thus this is a little more complicated than String.
+@@ -1657,6 +1744,7 @@
+            'Latency', 'Frequency', 'Clock', 'Voltage',
+            'NetworkBandwidth', 'MemoryBandwidth',
+            'AddrRange',
++           'GuestID', 'GuestAddrRange',
+            'MaxAddr', 'MaxTick', 'AllMemory',
+            'Time',
+            'NextEthernetAddr', 'NULL',
+diff -r 936a3a8006f6 src/sim/syscall_emul.cc
+--- a/src/sim/syscall_emul.cc	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/sim/syscall_emul.cc	Wed Apr 09 15:04:53 2014 +0800
+@@ -227,6 +227,24 @@
+ }
+ 
+ SyscallReturn
++pread64Func(SyscallDesc *desc, int num, LiveProcess *p, ThreadContext *tc)
++{
++    int index = 0;
++    int fd = p->sim_fd(p->getSyscallArg(tc, index));
++    Addr bufPtr = p->getSyscallArg(tc, index);
++    size_t nbytes = p->getSyscallArg(tc, index);
++    off_t offset = p->getSyscallArg(tc, index);
++    BufferArg bufArg(bufPtr, nbytes);
++
++    ssize_t bytes_read = pread64(fd, bufArg.bufferPtr(), nbytes, offset);
++
++    if (bytes_read != -1)
++        bufArg.copyOut(tc->getMemProxy());
++
++    return bytes_read;
++}
++
++SyscallReturn
+ writeFunc(SyscallDesc *desc, int num, LiveProcess *p, ThreadContext *tc)
+ {
+     int index = 0;
+@@ -244,6 +262,24 @@
+     return bytes_written;
+ }
+ 
++SyscallReturn
++pwrite64Func(SyscallDesc *desc, int num, LiveProcess *p, ThreadContext *tc)
++{
++    int index = 0;
++    int fd = p->sim_fd(p->getSyscallArg(tc, index));
++    Addr bufPtr = p->getSyscallArg(tc, index);
++    size_t nbytes = p->getSyscallArg(tc, index);
++    off_t offset = p->getSyscallArg(tc, index);
++    BufferArg bufArg(bufPtr, nbytes);
++
++    bufArg.copyIn(tc->getMemProxy());
++
++    ssize_t bytes_write = pwrite64(fd, bufArg.bufferPtr(), nbytes, offset);
++
++    fsync(fd);
++
++    return bytes_write;
++}
+ 
+ SyscallReturn
+ lseekFunc(SyscallDesc *desc, int num, LiveProcess *p, ThreadContext *tc)
+diff -r 936a3a8006f6 src/sim/syscall_emul.hh
+--- a/src/sim/syscall_emul.hh	Thu Apr 03 11:22:49 2014 +0200
++++ b/src/sim/syscall_emul.hh	Wed Apr 09 15:04:53 2014 +0800
+@@ -229,10 +229,18 @@
+ SyscallReturn readFunc(SyscallDesc *desc, int num,
+                        LiveProcess *p, ThreadContext *tc);
+ 
++/// Target pread64() handler.
++SyscallReturn pread64Func(SyscallDesc *desc, int num,
++                          LiveProcess *p, ThreadContext *tc);
++
+ /// Target write() handler.
+ SyscallReturn writeFunc(SyscallDesc *desc, int num,
+                         LiveProcess *p, ThreadContext *tc);
+ 
++/// Target pwrite64() handler.
++SyscallReturn pwrite64Func(SyscallDesc *desc, int num,
++                           LiveProcess *p, ThreadContext *tc);
++
+ /// Target lseek() handler.
+ SyscallReturn lseekFunc(SyscallDesc *desc, int num,
+                         LiveProcess *p, ThreadContext *tc);

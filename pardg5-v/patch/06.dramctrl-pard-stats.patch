@@ -1,0 +1,345 @@
+exporting patch:
+# HG changeset patch
+# User Jiuyue Ma <majiuyue@ncic.ac.cn>
+# Date 1405304029 -28800
+# Node ID 61764db3e099a9761d3b49a5420a1247029a8fb9
+# Parent  314b2035d065b336eea76abe6871121eae53fb32
+mem: add PARD stats to DRAMCtrl
+
+diff -r 314b2035d065 -r 61764db3e099 src/mem/dram_ctrl.cc
+--- a/src/mem/dram_ctrl.cc	Tue Jul 08 15:29:34 2014 +0800
++++ b/src/mem/dram_ctrl.cc	Mon Jul 14 10:13:49 2014 +0800
+@@ -61,6 +61,11 @@
+     busState(READ),
+     nextReqEvent(this), respondEvent(this), activateEvent(this),
+     prechargeEvent(this), refreshEvent(this), powerEvent(this),
++#ifdef ENABLE_PARD
++    tlb(), dispatchs(32),
++    stats(sizeof(struct DRAMCtrlStats)/sizeof(uint64_t), 32), 
++    triggers(stats, 32),
++#endif
+     drainManager(NULL),
+     deviceBusWidth(p->device_bus_width), burstLength(p->burst_length),
+     deviceRowBufferSize(p->device_rowbuffer_size),
+@@ -332,6 +337,9 @@
+                         pkt->getAddr() + pkt->getSize()) - addr;
+         readPktSize[ceilLog2(size)]++;
+         readBursts++;
++        #ifdef ENABLE_PARD
++        PARD_STATS(pkt)->readBursts++;
++        #endif
+ 
+         // First check write buffer to see if the data is already at
+         // the controller
+@@ -347,6 +355,10 @@
+                 DPRINTF(DRAM, "Read to addr %lld with size %d serviced by "
+                         "write queue\n", addr, size);
+                 bytesReadWrQ += burstSize;
++                #ifdef ENABLE_PARD
++                PARD_STATS(pkt)->servicedByWrQ++;
++                PARD_STATS(pkt)->bytesReadWrQ += burstSize;
++                #endif
+                 break;
+             }
+         }
+@@ -374,6 +386,9 @@
+ 
+             // Update stats
+             avgRdQLen = readQueue.size() + respQueue.size();
++            #ifdef ENABLE_PARD
++            PARD_STATS(pkt)->rdQLen = readQueue.size() + respQueue.size();
++            #endif
+         }
+ 
+         // Starting address of next dram pkt (aligend to burstSize boundary)
+@@ -413,6 +428,9 @@
+                         pkt->getAddr() + pkt->getSize()) - addr;
+         writePktSize[ceilLog2(size)]++;
+         writeBursts++;
++        #ifdef ENABLE_PARD
++        PARD_STATS(pkt)->writeBursts++;
++        #endif
+ 
+         // see if we can merge with an existing item in the write
+         // queue and keep track of whether we have merged or not so we
+@@ -487,10 +505,16 @@
+ 
+             // Update stats
+             avgWrQLen = writeQueue.size();
++            #ifdef ENABLE_PARD
++            PARD_STATS(pkt)->wrQLen = writeQueue.size();
++            #endif
+         } else {
+             // keep track of the fact that this burst effectively
+             // disappeared as it was merged with an existing one
+             mergedWrBursts++;
++            #ifdef ENABLE_PARD
++            PARD_STATS(pkt)->mergedWrBursts++;
++            #endif
+         }
+ 
+         // Starting address of next dram pkt (aligend to burstSize boundary)
+@@ -551,6 +575,9 @@
+     // Calc avg gap between requests
+     if (prevArrival != 0) {
+         totGap += curTick() - prevArrival;
++        #ifdef ENABLE_PARD
++        PARD_STATS(pkt)->totGap += curTick() - prevArrival;
++        #endif
+     }
+     prevArrival = curTick();
+ 
+@@ -571,11 +598,18 @@
+             // remember that we have to retry this port
+             retryRdReq = true;
+             numRdRetry++;
++            #ifdef ENABLE_PARD
++            PARD_STATS(pkt)->numRdRetry++;
++            #endif
+             return false;
+         } else {
+             addToReadQueue(pkt, dram_pkt_count);
+             readReqs++;
+             bytesReadSys += size;
++            #ifdef ENABLE_PARD
++            PARD_STATS(pkt)->readReqs++;
++            PARD_STATS(pkt)->bytesReadSys += size;
++            #endif
+         }
+     } else if (pkt->isWrite()) {
+         assert(size != 0);
+@@ -584,15 +618,25 @@
+             // remember that we have to retry this port
+             retryWrReq = true;
+             numWrRetry++;
++            #ifdef ENABLE_PARD
++            PARD_STATS(pkt)->numWrRetry++;
++            #endif
+             return false;
+         } else {
+             addToWriteQueue(pkt, dram_pkt_count);
+             writeReqs++;
+             bytesWrittenSys += size;
++            #ifdef ENABLE_PARD
++            PARD_STATS(pkt)->writeReqs++;
++            PARD_STATS(pkt)->bytesWrittenSys += size;
++            #endif
+         }
+     } else {
+         DPRINTF(DRAM,"Neither read nor write, ignore timing\n");
+         neitherReadNorWrite++;
++        #ifdef ENABLE_PARD
++        PARD_STATS(pkt)->neitherReadNorWrite++;
++        #endif
+         accessAndRespond(pkt, 1);
+     }
+ 
+@@ -1035,12 +1079,27 @@
+         totMemAccLat += dram_pkt->readyTime - dram_pkt->entryTime;
+         totBusLat += tBURST;
+         totQLat += cmd_at - dram_pkt->entryTime;
++
++        #ifdef ENABLE_PARD
++        if (row_hit)
++            PARD_STATS_DRAMPKT(dram_pkt)->readRowHits++;
++        PARD_STATS_DRAMPKT(dram_pkt)->bytesReadDRAM += burstSize;
++        PARD_STATS_DRAMPKT(dram_pkt)->totMemAccLat += dram_pkt->readyTime - dram_pkt->entryTime;
++        PARD_STATS_DRAMPKT(dram_pkt)->totBusLat += tBURST;
++        PARD_STATS_DRAMPKT(dram_pkt)->totQLat += cmd_at - dram_pkt->entryTime;
++        #endif
+     } else {
+         ++writesThisTime;
+         if (row_hit)
+             writeRowHits++;
+         bytesWritten += burstSize;
+         perBankWrBursts[dram_pkt->bankId]++;
++
++        #ifdef ENABLE_PARD
++        if (row_hit)
++            PARD_STATS_DRAMPKT(dram_pkt)->writeRowHits++;
++        PARD_STATS_DRAMPKT(dram_pkt)->bytesWritten += burstSize;
++        #endif
+     }
+ }
+ 
+@@ -1445,6 +1504,34 @@
+     }
+ }
+ 
++#ifdef ENABLE_PARD
++void
++DRAMCtrl::updateStats(StatsTable::StatsType *_stats, void *args)
++{
++    DRAMCtrlStats *stats = (DRAMCtrlStats *)_stats;
++    DRAMCtrl *ctrl = (DRAMCtrl *)args;
++
++    stats->avgQLat      = stats->totQLat / (stats->readBursts - stats->servicedByWrQ); 
++    stats->avgBusLat    = stats->totBusLat / (stats->readBursts - stats->servicedByWrQ);
++    stats->avgMemAccLat = stats->totMemAccLat / (stats->readBursts - stats->servicedByWrQ);
++    stats->readRowHitRate  = (stats->readRowHits / (stats->readBursts - stats->servicedByWrQ)) * 100;
++    stats->writeRowHitRate = (stats->writeRowHits / (stats->writeBursts - stats->mergedWrBursts)) * 100;
++/*
++    stats->avgRdBW      = (stats->bytesReadDRAM / 1000000) / simSeconds;
++    stats->avgWrBW      = (stats->bytesWritten / 1000000) / simSeconds;
++    stats->avgRdBWSys   = (stats->bytesReadSys / 1000000) / simSeconds;
++    stats->avgWrBWSys   = (stats->bytesWrittenSys / 1000000) / simSeconds;
++*/
++    stats->peakBW       = (SimClock::Frequency / ctrl->tBURST) * ctrl->burstSize / 1000000;
++    stats->busUtil      = (stats->avgRdBW + stats->avgWrBW) / stats->peakBW * 100;
++    stats->avgGap       = stats->totGap / (stats->readReqs + stats->writeReqs);
++    stats->busUtilRead  = stats->avgRdBW / stats->peakBW * 100;
++    stats->busUtilWrite = stats->avgWrBW / stats->peakBW * 100;
++    stats->pageHitRate  = (stats->writeRowHits + stats->readRowHits) /
++        (stats->writeBursts - stats->mergedWrBursts + stats->readBursts - stats->servicedByWrQ) * 100;
++}
++#endif
++
+ void
+ DRAMCtrl::regStats()
+ {
+@@ -1770,14 +1857,23 @@
+         dynamic_cast<DRAMCtrlSenderState *>(pkt->senderState);
+ 
+     // Restore initial sender state
+-    panic_if(receivedState == NULL, 
++    panic_if(receivedState == NULL,
+              "DRAMCtrl %s got a response without send state\n",
+              name());
+ 
+     pkt->senderState = receivedState->predecessor;
+     pkt->setAddr(receivedState->origAddr);
+     delete receivedState;
+- 
++
++    // After finish processing a request, check if any triggers satisfied
++    // ATTETION:
++    //     Only timing mode support trigger mechanism.
++    LDomID ldomID = QOSTAG_TO_LDOMID(pkt->getQosTag());
++    const TriggerTable::TriggeredList &tlist = memory.triggers.checkTrigger(ldomID);
++    for (int x=0; x<tlist.size(); x++)
++        DPRINTFN("Trigger <%d,%d>\n", tlist[x].first, tlist[x].second);
++
++    // Schedule response
+     queue.schedSendTiming(pkt, when);
+ }
+ #endif
+diff -r 314b2035d065 -r 61764db3e099 src/mem/dram_ctrl.hh
+--- a/src/mem/dram_ctrl.hh	Tue Jul 08 15:29:34 2014 +0800
++++ b/src/mem/dram_ctrl.hh	Mon Jul 14 10:13:49 2014 +0800
+@@ -63,6 +63,7 @@
+ #include "sim/eventq.hh"
+ 
+ #ifdef ENABLE_PARD
++#include "hyper/base/ControlPlane.hh"
+ #include "hyper/base/ldom_addr.hh"
+ #endif
+ 
+@@ -229,6 +230,11 @@
+ 
+         const bool isRead;
+ 
++        #ifdef ENABLE_PARD
++        /** QosTag copied from packet */
++        const uint64_t qosTag;
++        #endif
++
+         /** Will be populated by address decoder */
+         const uint8_t rank;
+         const uint8_t bank;
+@@ -266,7 +272,8 @@
+                    uint16_t _row, uint16_t bank_id, Addr _addr,
+                    unsigned int _size, Bank& bank_ref)
+             : entryTime(curTick()), readyTime(curTick()),
+-              pkt(_pkt), isRead(is_read), rank(_rank), bank(_bank), row(_row),
++              pkt(_pkt), isRead(is_read), qosTag(_pkt->getQosTag()),
++              rank(_rank), bank(_bank), row(_row),
+               bankId(bank_id), addr(_addr), size(_size), burstHelper(NULL),
+               bankRef(bank_ref)
+         { }
+@@ -434,13 +441,83 @@
+ 
+ #ifdef ENABLE_PARD
+   protected:
++
++    struct DispatchTableEntry {
++        int priority;
++        int effective_priority;
++    };
++    typedef std::vector<DispatchTableEntry> DispatchTable;
++    #define MAX_PRIORITY 64
++
+     /**
+      * PARD Configuration Table
+-     * 1. Logical domain address translator
+-     * 2. Bandwidth restriction
+-     * 3. Bandwidth usage
++     * 1. Logical domain address translator  **critical path**
++     * 2. Dispatch table                     **critical path**
++     * 3. Stats table & Trigger table
+      */
+     LDomAddrTLB tlb;
++    DispatchTable dispatchs;
++    StatsTable stats;
++    TriggerTable triggers;
++
++    static void updateStats(StatsTable::StatsType *stats, void *args);
++
++    // Get stats ptr from packet pointer
++    #define PARD_STATS(pkt)		\
++        if (pkt->hasQosTag())		\
++            stats.getStatsPtr<DRAMCtrlStats>(QOSTAG_TO_LDOMID((pkt)->getQosTag()))
++    // Get stats ptr from DRAMPacket pointer
++    #define PARD_STATS_DRAMPKT(drampkt)	\
++        stats.getStatsPtr<DRAMCtrlStats>(QOSTAG_TO_LDOMID((drampkt)->qosTag))
++
++    struct DRAMCtrlStats
++    {
++        uint64_t readReqs;
++        uint64_t writeReqs;
++        uint64_t readBursts;
++        uint64_t writeBursts;
++        uint64_t bytesReadDRAM;
++        uint64_t bytesReadWrQ;
++        uint64_t bytesWritten;
++        uint64_t bytesReadSys;
++        uint64_t bytesWrittenSys;
++        uint64_t servicedByWrQ;
++        uint64_t mergedWrBursts;
++        uint64_t neitherReadNorWrite;
++        uint64_t numRdRetry;
++        uint64_t numWrRetry;
++        uint64_t totGap;
++        uint64_t rdQLen;
++        uint64_t wrQLen;
++    
++        // Latencies summed over all requests
++        uint64_t totQLat;
++        uint64_t totMemAccLat;
++        uint64_t totBusLat;
++    
++        // Average latencies per request
++        uint64_t avgQLat;
++        uint64_t avgBusLat;
++        uint64_t avgMemAccLat;
++    
++        // Average bandwidth
++        uint64_t avgRdBW;
++        uint64_t avgWrBW;
++        uint64_t avgRdBWSys;
++        uint64_t avgWrBWSys;
++        uint64_t peakBW;
++        uint64_t busUtil;
++        uint64_t busUtilRead;
++        uint64_t busUtilWrite;
++    
++        // Row hit count and rate
++        uint64_t readRowHits;
++        uint64_t writeRowHits;
++        uint64_t readRowHitRate;
++        uint64_t writeRowHitRate;
++        uint64_t avgGap;
++        uint64_t pageHitRate;
++    };
+ 
+   private:
+ #endif

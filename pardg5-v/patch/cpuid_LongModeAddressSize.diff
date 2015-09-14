@@ -1,0 +1,70 @@
+exporting patch:
+# HG changeset patch
+# User Jiuyue Ma <majiuyue@ncic.ac.cn>
+# Date 1402649327 -28800
+# Node ID 3da6885cee9d19710342e581f5addf0dd4c13673
+# Parent  b21b3aad6bd1d01ac8a4d8030479bbca417af8d1
+x86: add LongModeAddressSize function to cpuid
+
+LongModeAddressSize was used by kernel 2.6.28.4 for physical address
+validation, if not properly implemented, PCI resource allocation may
+failed because of ioremap failed:
+
+- linux-2.6.28.4/arch/x86/mm/ioremap.c:27-30
+  27 static inline int phys_addr_valid(unsigned long addr)
+  28 {
+  29     return addr < (1UL << boot_cpu_data.x86_phys_bits);
+  30 }
+
+- linux-2.6.28.4/arch/x86/kernel/cpu/common.c:475-482
+ 475 #ifdef CONFIG_X86_64
+ 476         if (c->extended_cpuid_level >= 0x80000008) {
+ 477                 u32 eax = cpuid_eax(0x80000008);
+ 478
+ 479                 c->x86_virt_bits = (eax >> 8) & 0xff;
+ 480                 c->x86_phys_bits = eax & 0xff;
+ 481         }
+ 482 #endif
+
+- linux-2.6.28.4/arch/x86/mm/ioremap.c:209-214
+ 209 if (!phys_addr_valid(phys_addr)) {
+ 210     printk(KERN_WARNING "ioremap: invalid physical address %llx\n",
+ 211            (unsigned long long)phys_addr);
+ 212     WARN_ON_ONCE(1);
+ 213     return NULL;
+ 214 }
+
+This patch return 0x0000ffff for LongModeAddressSize, which guarantee phys_addr_valid never failed.
+
+diff -r b21b3aad6bd1 -r 3da6885cee9d src/arch/x86/cpuid.cc
+--- a/src/arch/x86/cpuid.cc	Tue Jun 10 17:44:39 2014 -0400
++++ b/src/arch/x86/cpuid.cc	Fri Jun 13 16:48:47 2014 +0800
+@@ -48,12 +48,12 @@
+         L1CacheAndTLB,
+         L2L3CacheAndL2TLB,
+         APMInfo,
++        LongModeAddressSize,
+  
+         /*
+          * The following are defined by the spec but not yet implemented
+          */
+-/*      LongModeAddressSize,
+-        // Function 9 is reserved
++/*      // Function 9 is reserved
+         SVMInfo = 10,
+         // Functions 11-24 are reserved
+         TLB1GBPageInfo = 25,
+@@ -130,8 +130,11 @@
+                 result = CpuidResult(0x80000018, 0x68747541,
+                                      0x69746e65, 0x444d4163);
+                 break;
+-/*            case LongModeAddressSize:
+-              case SVMInfo:
++              case LongModeAddressSize:
++                result = CpuidResult(0x0000ffff, 0x00000000,
++                                     0x00000000, 0x00000000);
++                break;
++/*            case SVMInfo:
+               case TLB1GBPageInfo:
+               case PerformanceInfo:*/
+               default:

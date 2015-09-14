@@ -1,0 +1,115 @@
+diff -r 52cc66ab0e0b -r 4de45150adf0 src/base/types.hh
+--- a/src/base/types.hh	Fri Mar 28 08:58:35 2014 +0800
++++ b/src/base/types.hh	Fri Apr 04 10:31:46 2014 +0800
+@@ -180,4 +180,6 @@
+ template <class T> class RefCountingPtr;
+ typedef RefCountingPtr<FaultBase> Fault;
+ 
++typedef uint16_t GuestID;
++
+ #endif // __BASE_TYPES_HH__
+diff -r 52cc66ab0e0b -r 4de45150adf0 src/python/m5/params.py
+--- a/src/python/m5/params.py	Fri Mar 28 08:58:35 2014 +0800
++++ b/src/python/m5/params.py	Fri Apr 04 10:31:46 2014 +0800
+@@ -639,6 +639,93 @@
+                          int(self.intlvHighBit), int(self.intlvBits),
+                          int(self.intlvMatch))
+ 
++class GuestID(CheckedInt):
++    cxx_type = 'GuestID'
++    size = 16
++    unsigned = True
++
++class GuestAddrRange(ParamValue):
++    cxx_type = 'GuestAddrRange'
++
++    def __init__(self, *args, **kwargs):
++        # Disable interleaving by default
++        self.intlvHighBit = 0
++        self.intlvBits = 0
++        self.intlvMatch = 0
++
++        def handle_kwargs(self, kwargs):
++            # An address range needs to have an upper limit, specified
++            # either explicitly with an end, or as an offset using the
++            # size keyword.
++            if 'end' in kwargs:
++                self.end = Addr(kwargs.pop('end'))
++            elif 'size' in kwargs:
++                self.end = self.start + Addr(kwargs.pop('size')) - 1
++            else:
++                raise TypeError, "Either end or size must be specified"
++
++            # Now on to the optional bit
++            if 'intlvHighBit' in kwargs:
++                self.intlvHighBit = int(kwargs.pop('intlvHighBit'))
++            if 'intlvBits' in kwargs:
++                self.intlvBits = int(kwargs.pop('intlvBits'))
++            if 'intlvMatch' in kwargs:
++                self.intlvMatch = int(kwargs.pop('intlvMatch'))
++
++        if 'guestID' in kwargs:
++            self.guestID = GuestID(kwargs.pop('guestID'))
++        else:
++            raise TypeError, "guestID must be specified in kwargs"
++
++        if len(args) == 0:
++            self.start = Addr(kwargs.pop('start'))
++            handle_kwargs(self, kwargs)
++
++        elif len(args) == 1:
++            if kwargs:
++                self.start = Addr(args[0])
++                handle_kwargs(self, kwargs)
++            elif isinstance(args[0], (list, tuple)):
++                self.start = Addr(args[0][0])
++                self.end = Addr(args[0][1])
++            else:
++                self.start = Addr(0)
++                self.end = Addr(args[0]) - 1
++
++        elif len(args) == 2:
++            self.start = Addr(args[0])
++            self.end = Addr(args[1])
++        else:
++            raise TypeError, "Too many arguments specified"
++
++        if kwargs:
++            raise TypeError, "Too many keywords: %s" % kwargs.keys()
++
++    def __str__(self):
++        return '(%s)%s:%s' % (self.guestID, self.start, self.end)
++
++    def size(self):
++        # Divide the size by the size of the interleaving slice
++        return (long(self.end) - long(self.start) + 1) >> self.intlvBits
++
++    @classmethod
++    def cxx_predecls(cls, code):
++        Addr.cxx_predecls(code)
++        code('#include "hyper/base/guest_addr_range.hh"')
++
++    @classmethod
++    def swig_predecls(cls, code):
++        Addr.swig_predecls(code)
++
++    def getValue(self):
++        # Go from the Python class to the wrapped C++ class generated
++        # by swig
++        from m5.internal.xrange import GuestAddrRange
++
++        return GuestAddrRange(long(self.start), long(self.end),
++                         int(self.intlvHighBit), int(self.intlvBits),
++                         int(self.intlvMatch), int(self.guestID))
++
+ # Boolean parameter type.  Python doesn't let you subclass bool, since
+ # it doesn't want to let you create multiple instances of True and
+ # False.  Thus this is a little more complicated than String.
+@@ -1657,6 +1744,7 @@
+            'Latency', 'Frequency', 'Clock', 'Voltage',
+            'NetworkBandwidth', 'MemoryBandwidth',
+            'AddrRange',
++           'GuestID', 'GuestAddrRange',
+            'MaxAddr', 'MaxTick', 'AllMemory',
+            'Time',
+            'NextEthernetAddr', 'NULL',

@@ -1,0 +1,66 @@
+exporting patch:
+# HG changeset patch
+# User Jiuyue Ma <majiuyue@ncic.ac.cn>
+# Date 1399190132 -28800
+# Node ID 3a113e5ef5a086a3a61ffbf298ba515538eeebb1
+# Parent  578c44402a28fe00ed032a0ba12eda890b0ff9dc
+make some interfaces of dram_ctrl virtual, for overwrite in PARDg5-V
+
+diff -r 578c44402a28 -r 3a113e5ef5a0 src/mem/dram_ctrl.hh
+--- a/src/mem/dram_ctrl.hh	Sun Apr 27 15:43:10 2014 +0800
++++ b/src/mem/dram_ctrl.hh	Sun May 04 15:55:32 2014 +0800
+@@ -83,7 +83,7 @@
+ class DRAMCtrl : public AbstractMemory
+ {
+ 
+-  private:
++  protected:
+ 
+     // For now, make use of a queued slave port to avoid dealing with
+     // flow control for the responses being sent back
+@@ -204,6 +204,8 @@
+ 
+         const bool isRead;
+ 
++        const uint64_t qostag;
++
+         /** Will be populated by address decoder */
+         const uint8_t rank;
+         const uint8_t bank;
+@@ -241,7 +243,8 @@
+                    uint16_t _row, uint16_t bank_id, Addr _addr,
+                    unsigned int _size, Bank& bank_ref)
+             : entryTime(curTick()), readyTime(curTick()),
+-              pkt(_pkt), isRead(is_read), rank(_rank), bank(_bank), row(_row),
++              pkt(_pkt), isRead(is_read), qostag(_pkt->getQosTag()),
++              rank(_rank), bank(_bank), row(_row),
+               bankId(bank_id), addr(_addr), size(_size), burstHelper(NULL),
+               bankRef(bank_ref)
+         { }
+@@ -339,7 +342,7 @@
+      * @param pkt The packet from the outside world
+      * @param static_latency Static latency to add before sending the packet
+      */
+-    void accessAndRespond(PacketPtr pkt, Tick static_latency);
++    virtual void accessAndRespond(PacketPtr pkt, Tick static_latency);
+ 
+     /**
+      * Address decoder to figure out physical mapping onto ranks,
+@@ -370,7 +373,7 @@
+      * doDRAMAccess on that request in order to actually service
+      * that request
+      */
+-    void scheduleNextReq();
++    virtual void scheduleNextReq();
+ 
+     /**
+      *Looks at the state of the banks, channels, row buffer hits etc
+@@ -403,7 +406,7 @@
+      * For FR-FCFS policy reorder the read/write queue depending on row buffer
+      * hits and earliest banks available in DRAM
+      */
+-    void reorderQueue(std::deque<DRAMPacket*>& queue);
++    virtual void reorderQueue(std::deque<DRAMPacket*>& queue);
+ 
+     /**
+      * Looking at all banks, determine the moment in time when they

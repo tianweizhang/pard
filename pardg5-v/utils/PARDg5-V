@@ -1,0 +1,24 @@
+#!/bin/bash
+clear && echo "
+  \$\$\$\$\$\$\$\   \$\$\$\$\$\$\  \$\$\$\$\$\$\$\  \$\$\$\$\$\$\$\            \$\$\$\$\$\$\$\        \$\$\    \$\$\ 
+  \$\$  __\$\$\ \$\$  __\$\$\ \$\$  __\$\$\ \$\$  __\$\$\           \$\$  ____|       \$\$ |   \$\$ |
+  \$\$ |  \$\$ |\$\$ /  \$\$ |\$\$ |  \$\$ |\$\$ |  \$\$ | \$\$\$\$\$\$\  \$\$ |            \$\$ |   \$\$ |
+  \$\$\$\$\$\$\$  |\$\$\$\$\$\$\$\$ |\$\$\$\$\$\$\$  |\$\$ |  \$\$ |\$\$  __\$\$\ \$\$\$\$\$\$\$\ \$\$\$\$\$\$\\\\\$\$\  \$\$  |
+  \$\$  ____/ \$\$  __\$\$ |\$\$  __\$\$< \$\$ |  \$\$ |\$\$ /  \$\$ |\_____\$\$\\\\______|\\$\$\\$\$  / 
+  \$\$ |      \$\$ |  \$\$ |\$\$ |  \$\$ |\$\$ |  \$\$ |\$\$ |  \$\$ |\$\$\   \$\$ |        \\$\$\$  /  
+  \$\$ |      \$\$ |  \$\$ |\$\$ |  \$\$ |\$\$\$\$\$\$\$  |\\$\$\$\$\$\$\$ |\\$\$\$\$\$\$  |         \\$  /   
+  \__|      \__|  \__|\__|  \__|\_______/  \____\$\$ | \______/           \_/    
+                                          \$\$\   \$\$ |                           
+                                          \\$\$\$\$\$\$  |                           
+                                           \______/                            
+"
+# PARDg5-V Startup system
+PARDg5_HOME=/home/majiuyue/PARDg5-V
+
+echo "Startup GM system..."
+M5_PATH=$PARDg5_HOME/system/gmsys $PARDg5_HOME/build/X86_MESI_Two_Level/gem5.opt $PARDg5_HOME/configs/PARDg5-GM.py --cpu-type=atomic --num-cpus=1 --num-dirs=1 --mem-size=32MB --mem-type=ddr3_1600_x64 --kernel=$PARDg5_HOME/system/gmsys/binaries/linux-2.6.28.4/vmlinux &
+
+echo "Startup main system..."
+M5_PATH=$PARDg5_HOME/system $PARDg5_HOME/build/X86_MESI_Two_Level/gem5.opt $PARDg5_HOME/configs/PARDg5-V.py --cpu-type=atomic --num-cpus=4 --num-dirs=1 --mem-size=3GB --mem-type=ddr3_1600_x64 --kernel=/home/majiuyue/PARDg5-V/system/binaries/x86_64-vmlinux-2.6.28.4 --num-guests=1 2>&1 | tee -a $PARDg5_HOME/logs/main.log
+
+sleep 1
