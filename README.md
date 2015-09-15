@@ -23,7 +23,7 @@
     insmod /lib/modules/2.6.28.4-gc395911-dirty/cpa.ko
   
 8. Check cp value:
-    cat sys/cpa/cp[0-4]/ident
+    cat sys/cpa/cpa[0-4]/ident
   
 9. Run LDOM:
     utils/command.sh create
