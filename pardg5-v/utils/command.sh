@@ -15,14 +15,31 @@ case $1 in
     send_command "\$C#"
     ;;
   query)
-    send_command "\$q:system.mem_ctrls.addr_mapper:$2:0#"
+    send_command "\$q:test_system.$2:$3:0#"
+#    send_command "\$q:test_system.l2.tags:$2:0#"
     ;;
   adjust)
-    send_command "\$s:test_system.l2.tags:$2:0:0:65532#"
-    send_command "\$s:test_system.l2.tags:$2:1:0:3#"
-    send_command "\$s:test_system.l2.tags:$2:2:0:3#"
-    send_command "\$s:test_system.l2.tags:$2:3:0:3#"
+    ((num=16#$4))
+    send_command "\$s:test_system.$2:$3:0:$num#"
+#    send_command "\$s:test_system.l2.tags:$2:0:0:65532#"
+#    send_command "\$s:test_system.l2.tags:$2:1:0:3#"
+#    send_command "\$s:test_system.l2.tags:$2:2:0:3#"
+#    send_command "\$s:test_system.l2.tags:$2:3:0:3#"
     ;;
   *)
-    echo "$0 [startup|shutdown] [LDomID]"
+    echo "************************************************************************"
+    echo -e "***** \e[1;31mcreate LDom space\e[0m"
+    echo -e "*****        \e[1;34m$0 create\e[0m"
+    echo -e "***** ---------------------------------------------"
+    echo -e "***** \e[1;31mstartup/shutdown LDom\e[0m"
+    echo -e "*****        \e[1;34m$0 [startup|shutdown] [LDomID]\e[0m"
+    echo -e "***** ---------------------------------------------"
+    echo -e "***** \e[1;31mquery each CP parameter table\e[0m"
+    echo -e "*****        \e[1;32mCPName: l2.tags  membus  membus.mapper\e[0m"
+    echo -e "*****        \e[1;34m$0 query [CPName] [LDomID]\e[0m"
+    echo -e "***** ---------------------------------------------"
+    echo -e "***** \e[1;31mset each CP parameter table\e[0m"
+    echo -e "*****        \e[1;32mmembus value: 0-nonblock; 1-block\e[0m"
+    echo -e "*****        \e[1;34m$0 adjust [CPName] [LDomID] [value]\e[0m"
+    echo "************************************************************************"
 esac
