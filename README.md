@@ -2,6 +2,7 @@
 1. Download pard, and copy system folder to pard/pardg5-v
 
 2. Install dependency for gem5:
+    
   sudo apt-get install -y g++ scons swig zlib1g-dev m4 python-dev libreadline-dev 
   
 3. Compiling gem5-pard:
